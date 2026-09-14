@@ -412,6 +412,11 @@
           </button>
         </li>
         <li v-if="canWrite">
+          <button @click="renameFolder(focusedItem)">
+            <span>重命名</span>
+          </button>
+        </li>
+        <li v-if="canWrite">
           <button @click="moveFile(focusedItem + '_$folder$')">
             <span>移动</span>
           </button>
@@ -2388,6 +2393,78 @@ export default {
 
         console.error('重命名失败:', error);
         this.showCustomToast('重命名失败: ' + (error.message || '未知错误'), 'error');
+      }
+    },
+
+    // 重命名文件夹：本质上和"移动文件夹"是同一件事——把文件夹下所有文件和
+    // 子文件夹标记，从旧路径前缀复制到新路径前缀（只是新路径和旧路径同级，
+    // 只有最后一段名字不一样），再删除旧的，复用和移动/删除文件夹完全一样的
+    // getAllItems 递归枚举逻辑。
+    async renameFolder(folderPath) {
+      // 检查写权限
+      if (!this.canWrite) {
+        this.showPermissionDialog('重命名文件夹');
+        return;
+      }
+
+      // 关闭右键菜单
+      this.showContextMenu = false;
+
+      const folderMarkerKey = folderPath + '_$folder$';
+      const currentName = folderPath.split('/').filter(Boolean).pop() || folderPath;
+
+      try {
+        const newName = await this.showInputPrompt('重命名文件夹', '新名称:', currentName);
+        if (!newName) return;
+        if (newName === currentName) return; // 名称没变，不用做任何事
+
+        // 计算父目录路径：只替换路径最后一段，保持在同一层级下
+        const segments = folderPath.split('/').filter(Boolean);
+        segments.pop();
+        const parentPath = segments.length > 0 ? segments.join('/') + '/' : '';
+        const targetBasePath = parentPath + newName + '/';
+
+        // 递归获取文件夹内的所有文件和子文件夹标记
+        const allItems = await this.getAllItems(folderPath);
+
+        const total = allItems.length;
+        let done = 0;
+        if (total > 0) this.uploadProgress = 0;
+
+        for (const item of allItems) {
+          const relativePath = item.key.substring(folderPath.length);
+          const newPath = targetBasePath + relativePath;
+          try {
+            await this.copyPaste(item.key, newPath);
+            await this.deleteFile(item.key);
+          } catch (itemError) {
+            // 权限错误直接中止整个重命名流程并向上抛出
+            if (itemError.isAuthError) throw itemError;
+            // 单个文件失败不阻断整体流程，记录后继续处理其余文件
+            console.error(`重命名 ${item.key} 失败:`, itemError);
+          }
+          done++;
+          if (total > 0) this.uploadProgress = (done / total) * 100;
+        }
+
+        // 最后处理文件夹自身的标记
+        const targetFolderMarkerKey = targetBasePath.slice(0, -1) + '_$folder$';
+        await this.copyPaste(folderMarkerKey, targetFolderMarkerKey);
+        await this.deleteFile(folderMarkerKey);
+
+        this.uploadProgress = null;
+        await this.fetchFiles();
+        this.showCustomToast(`文件夹已重命名为 "${newName}"`, 'success');
+      } catch (error) {
+        this.uploadProgress = null;
+        if (error === null || error === false) return; // 用户取消
+
+        if (error.isAuthError) {
+          this.showPermissionDialog('重命名文件夹');
+          return;
+        }
+        console.error('重命名文件夹失败:', error);
+        this.showCustomToast('重命名文件夹失败: ' + (error.message || '未知错误'), 'error');
       }
     },
 
