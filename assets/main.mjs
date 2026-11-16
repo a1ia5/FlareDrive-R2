@@ -10,21 +10,30 @@ async function captureImageFrame(ctx, srcUrl) {
   ctx.drawImage(image, 0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE);
 }
 
-async function captureVideoFrame(ctx, srcUrl, timeoutMs) {
-  const video = await new Promise((resolve, reject) => {
+// 画面平均亮度（0~255）。每隔几个像素取样一次就够了。
+function frameBrightness(imageData) {
+  const data = imageData.data;
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < data.length; i += 16) {
+    sum += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+    count++;
+  }
+  return count ? sum / count : 0;
+}
+
+// 亮度达到这个值就认为"已经是一张正常的画面"，不再继续取后面的帧，
+// 避免对开头本来就正常的大视频多做几次远程 seek。
+const BRIGHT_ENOUGH = 90;
+const SEEK_TIMEOUT_MS = 8000;
+
+function loadVideo(srcUrl, timeoutMs) {
+  return new Promise((resolve, reject) => {
     const videoEl = document.createElement("video");
     videoEl.muted = true;
     videoEl.playsInline = true; // 避免部分移动端浏览器把视频拉到全屏播放
     videoEl.preload = "auto";
-    videoEl.src = srcUrl;
 
-    // 原来固定写死 2 秒超时，且成功之后从不清除这个定时器：
-    // 对文件稍大一些的视频（尤其是 moov 元数据在文件末尾的常见"非快速启动"
-    // MP4，解码器需要更多时间才能定位到第一帧）经常来不及在 2 秒内完成，
-    // 导致缩略图生成直接失败、customMetadata.thumbnail 永远为空，
-    // 但小文件因为够快、resolve 先一步完成而看不出问题——这正好和
-    // "部分视频有缩略图、部分没有"的现象吻合。这里改成随文件大小适当放宽，
-    // 并且无论成功失败都会正确清掉这个定时器。
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("Video load timeout"));
@@ -32,45 +41,93 @@ async function captureVideoFrame(ctx, srcUrl, timeoutMs) {
 
     function cleanup() {
       clearTimeout(timer);
-      videoEl.removeEventListener("loadeddata", onLoadedData);
-      videoEl.removeEventListener("seeked", onSeeked);
+      videoEl.removeEventListener("loadeddata", onLoaded);
       videoEl.removeEventListener("error", onError);
     }
-
-    function onSeeked() {
+    function onLoaded() {
       cleanup();
       resolve(videoEl);
     }
-
-    async function onLoadedData() {
-      try {
-        // 很多视频第 0 帧是全黑/过渡帧，取靠前一点但非 0 的时间点效果更好；
-        // 关键是要真正监听 "seeked" 事件之后再截帧，而不是设置完
-        // currentTime 就假定已经跳转完成——seek 本身是异步的。
-        videoEl.currentTime = Math.min(0.1, (videoEl.duration || 0.2) / 2);
-      } catch (seekErr) {
-        cleanup();
-        reject(seekErr);
-      }
-    }
-
     function onError() {
-      // 容器是 .mp4/.mov 等后缀，不代表浏览器一定能解码其内部的具体编码格式，
-      // 遇到不支持的编码或文件损坏时，浏览器会触发 error 事件。
-      // 之前的代码完全没有监听这个事件，只能死等 2 秒超时，
-      // 现在改为一旦确定加载失败就立刻放弃，不再生成缩略图（走上传流程原有的
-      // try/catch 兜底，回退到通用文件图标），也不会再产生一张空白缩略图。
-      // 注意：如果是浏览器本身就无法解码的编码格式（比如某些 HEVC/H.265），
-      // 这里也只能识别到"加载失败"，没有办法在纯前端把它解码出来。
+      // 后缀是 .mp4/.mov 不代表浏览器能解码里面的编码（例如部分 HEVC/H.265），
+      // 这种情况纯前端没有办法生成缩略图。
       cleanup();
       reject(new Error("Video failed to load: " + (videoEl.error ? videoEl.error.message : "unknown error")));
     }
 
-    videoEl.addEventListener("loadeddata", onLoadedData, { once: true });
+    videoEl.addEventListener("loadeddata", onLoaded);
+    videoEl.addEventListener("error", onError);
+    videoEl.src = srcUrl;
+  });
+}
+
+// seek 是异步的，必须等 "seeked" 事件之后画面才是目标时间点的那一帧
+function seekTo(videoEl, time) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Video seek timeout"));
+    }, SEEK_TIMEOUT_MS);
+    function cleanup() {
+      clearTimeout(timer);
+      videoEl.removeEventListener("seeked", onSeeked);
+      videoEl.removeEventListener("error", onError);
+    }
+    function onSeeked() {
+      cleanup();
+      resolve();
+    }
+    function onError() {
+      cleanup();
+      reject(new Error("Video seek failed"));
+    }
     videoEl.addEventListener("seeked", onSeeked);
     videoEl.addEventListener("error", onError);
+    videoEl.currentTime = time;
   });
-  ctx.drawImage(video, 0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE);
+}
+
+// 候选时间点：开头 0.1 秒，以及时长的 10% / 25% / 50% / 75%
+export function thumbnailCandidateTimes(duration) {
+  if (!isFinite(duration) || duration <= 0) return [0.1];
+  const raw = [Math.min(0.1, duration / 2), duration * 0.1, duration * 0.25, duration * 0.5, duration * 0.75];
+  const times = [];
+  for (const t of raw) {
+    const clamped = Math.max(0, Math.min(t, Math.max(0, duration - 0.05)));
+    if (!times.some((x) => Math.abs(x - clamped) < 0.05)) times.push(clamped);
+  }
+  return times;
+}
+
+// 很多视频开头是黑屏或渐入，固定取 0.1 秒那一帧会得到一张全黑的缩略图。
+// 现在按顺序取几个时间点的帧，选其中最亮的一张。
+async function captureVideoFrame(ctx, srcUrl, timeoutMs) {
+  const video = await loadVideo(srcUrl, timeoutMs);
+  const size = THUMBNAIL_SIZE;
+  let best = null;
+
+  try {
+    for (const time of thumbnailCandidateTimes(video.duration)) {
+      try {
+        await seekTo(video, time);
+      } catch (seekError) {
+        if (best) break; // 已经有可用的帧，后面的取不到就算了
+        throw seekError;
+      }
+      ctx.drawImage(video, 0, 0, size, size);
+      const imageData = ctx.getImageData(0, 0, size, size);
+      const brightness = frameBrightness(imageData);
+      if (!best || brightness > best.brightness) best = { brightness, imageData };
+      if (brightness >= BRIGHT_ENOUGH) break;
+    }
+  } finally {
+    // 释放解码器和网络连接
+    video.removeAttribute("src");
+    video.load();
+  }
+
+  if (!best) throw new Error("未能从视频中取到画面");
+  ctx.putImageData(best.imageData, 0, 0);
 }
 
 /**

@@ -1,5 +1,6 @@
 import { notFound, parseBucketPath } from "@/utils/bucket";
-import {get_auth_status} from "@/utils/auth";
+import { get_auth_status, checkPathPermission, isInternalPath, isThumbnailKey, isSafeKey } from "@/utils/auth";
+import { pickContentType } from "@/utils/response";
 import {isCrossOriginRequest, crossOriginRejectedResponse} from "@/utils/csrf";
 
 function unauthorizedResponse() {
@@ -18,12 +19,13 @@ export async function onRequestPostCreateMultipart(context) {
   const request: Request = context.request;
 
   const customMetadata: Record<string, string> = {};
-  if (request.headers.has("fd-thumbnail"))
-    customMetadata.thumbnail = request.headers.get("fd-thumbnail");
+  const thumbnailHeader = request.headers.get("fd-thumbnail");
+  if (thumbnailHeader && /^[0-9a-f]{40}$/.test(thumbnailHeader))
+    customMetadata.thumbnail = thumbnailHeader;
 
   const multipartUpload = await bucket.createMultipartUpload(path, {
     httpMetadata: {
-      contentType: request.headers.get("content-type"),
+      contentType: pickContentType(request.headers.get("content-type"), path),
     },
     customMetadata,
   });
@@ -74,7 +76,8 @@ export async function onRequestPostFixMetadata(context) {
     .catch(() => ({}));
 
   const customMetadata: Record<string, string> = { ...(existing.customMetadata || {}) };
-  if (body.thumbnail) customMetadata.thumbnail = body.thumbnail;
+  if (typeof body.thumbnail === "string" && /^[0-9a-f]{40}$/.test(body.thumbnail))
+    customMetadata.thumbnail = body.thumbnail;
 
   const contentType = body.contentType || existing.httpMetadata?.contentType;
 
@@ -166,15 +169,28 @@ export async function onRequestPut(context) {
   // 大文件才会被正确设置。列表接口读到 httpMetadata.contentType 为 undefined 时
   // 前端只能把文件当成通用的 'application/octet-stream'，导致缩略图/预览图标
   // 完全无法显示，即使 customMetadata.thumbnail 本身是有效的。
-  let contentType: string | undefined = request.headers.get("content-type") || undefined;
+  let contentType: string | undefined = pickContentType(request.headers.get("content-type"), path);
 
   if (request.headers.has("x-amz-copy-source")) {
-    const sourceName = decodeURIComponent(
-      request.headers.get("x-amz-copy-source")
-    );
+    let sourceName: string;
+    try {
+      sourceName = decodeURIComponent(request.headers.get("x-amz-copy-source"));
+    } catch {
+      return new Response("无效的复制源", { status: 400 });
+    }
+    // 修复：此前复制源完全不做权限检查，只要对目标目录有写权限，
+    // 就能把任意路径（其他用户的目录、内部文件）的内容复制到自己目录里读出来。
+    const sourceReadable =
+      isSafeKey(sourceName) &&
+      (isInternalPath(sourceName)
+        ? isThumbnailKey(sourceName)
+        : await checkPathPermission(context, sourceName, false));
+    if (!sourceReadable) return unauthorizedResponse();
+
     const source = await bucket.get(sourceName);
+    if (!source) return new Response("复制源不存在", { status: 404 });
     content = source.body;
-    if (source.customMetadata.thumbnail)
+    if (source.customMetadata?.thumbnail)
       customMetadata.thumbnail = source.customMetadata.thumbnail;
     // 复制/移动场景下，前端发出的 Content-Type 请求头固定是占位值
     // "application/octet-stream"，并不代表源文件的真实类型；这里改为沿用
@@ -182,8 +198,9 @@ export async function onRequestPut(context) {
     contentType = source.httpMetadata?.contentType || contentType;
   }
 
-  if (request.headers.has("fd-thumbnail"))
-    customMetadata.thumbnail = request.headers.get("fd-thumbnail");
+  const thumbnailHeader = request.headers.get("fd-thumbnail");
+  if (thumbnailHeader && /^[0-9a-f]{40}$/.test(thumbnailHeader))
+    customMetadata.thumbnail = thumbnailHeader;
 
   const obj = await bucket.put(path, content, {
     customMetadata,

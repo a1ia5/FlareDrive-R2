@@ -6,7 +6,7 @@
       :style="{ backgroundImage: `url('${backgroundImageUrl}')` }"
   >
     <progress v-if="uploadProgress !== null" :value="uploadProgress" max="100"></progress>
-    <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder"></UploadPopup>
+    <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder" @fetchUrl="fetchFromUrl"></UploadPopup>
 
 
 
@@ -365,7 +365,7 @@
               <input type="checkbox" :checked="isFileSelected(file.key)" @click.stop @change.stop="toggleFileSelection(file.key)">
             </div>
             <MimeIcon :content-type="file.httpMetadata?.contentType || 'application/octet-stream'" :thumbnail="file.customMetadata?.thumbnail
-              ? `/raw/_$flaredrive$/thumbnails/${file.customMetadata.thumbnail}.png`
+              ? thumbnailUrl(file.customMetadata.thumbnail)
               : null
               " />
             <div class="file-info-container">
@@ -449,7 +449,7 @@
           </button>
         </li>
         <li>
-          <button @click="copyLink(`/raw/${focusedItem.key}`)">
+          <button @click="shareFile(focusedItem.key)">
             <span>复制链接</span>
           </button>
         </li>
@@ -780,6 +780,9 @@ export default {
     // 屏幕中央的阻断式进度提示，用于耗时较长的操作（比如重新生成大视频的缩略图），
     // 和右上角一闪而过的 toast 不一样，这个会一直显示直到操作结束
     centerProgress: { visible: false, text: '', fileName: '' },
+    // /raw/ 读取用的签名令牌：由文件列表接口随目录内容一起下发
+    rawTokens: [],
+    thumbToken: '',
     // 多选功能相关
     selectedFiles: [], // 选中的文件列表
     isMultiSelectMode: false, // 是否处于多选模式
@@ -957,6 +960,145 @@ export default {
       }
     },
 
+    // 记录文件列表接口下发的签名令牌
+    registerRawToken(data) {
+      if (!data || !data.rawToken) return;
+      this.thumbToken = data.rawToken;
+      if (typeof data.rawTokenPrefix === 'string') {
+        const rest = this.rawTokens.filter(t => t.prefix !== data.rawTokenPrefix).slice(-500);
+        rest.push({ prefix: data.rawTokenPrefix, token: data.rawToken });
+        this.rawTokens = rest;
+      }
+    },
+
+    // 生成应用内使用的 /raw/ 地址（缩略图、预览、全景图、下载）。
+    // GUEST 目录下的文件不需要令牌；其他文件带上所在目录的签名令牌。
+    rawUrl(key) {
+      const base = '/raw/' + key.split('/').map(encodeURIComponent).join('/');
+      let best = null;
+      for (const t of this.rawTokens) {
+        if (key.startsWith(t.prefix) && (!best || t.prefix.length > best.prefix.length)) best = t;
+      }
+      return best ? `${base}?token=${best.token}` : base;
+    },
+
+    thumbnailUrl(digest) {
+      const base = `/raw/_$flaredrive$/thumbnails/${digest}.png`;
+      return this.thumbToken ? `${base}?token=${this.thumbToken}` : base;
+    },
+
+    // 复制文件的分享链接：向服务端申请一个只对该文件有效、带过期时间的签名链接
+    async shareFile(key) {
+      this.showContextMenu = false;
+      let days;
+      try {
+        const input = await this.showInputPrompt('复制分享链接', '有效天数（1-30）', '7');
+        if (input === null || input === undefined || input === '') return;
+        days = Math.min(30, Math.max(1, parseFloat(input) || 7));
+      } catch (e) {
+        return; // 用户取消
+      }
+
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        const savedCredentials = localStorage.getItem('authCredentials');
+        if (savedCredentials) headers['Authorization'] = `Basic ${savedCredentials}`;
+
+        const response = await fetch('/api/sign', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ key, expiresIn: Math.round(days * 86400) })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.url) throw new Error(data.error || '生成链接失败');
+
+        await this.writeClipboard(data.url);
+        if (data.public) {
+          this.showCustomToast('公开文件的链接已复制（长期有效）', 'success');
+        } else {
+          const until = new Date(data.expires * 1000).toLocaleString();
+          this.showCustomToast(`分享链接已复制，有效期至 ${until}`, 'success');
+        }
+      } catch (error) {
+        this.showCustomToast('复制分享链接失败: ' + (error.message || '未知错误'), 'error');
+      }
+    },
+
+    async writeClipboard(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (e) {
+        // 部分浏览器在异步请求之后不再允许直接写剪贴板，退回到 execCommand
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(area);
+        if (!ok) throw new Error('浏览器拒绝写入剪贴板');
+      }
+    },
+
+    // 离线下载：让服务端抓取一个 URL 保存到当前目录
+    async fetchFromUrl() {
+      this.showUploadPopup = false;
+      if (!this.canWrite) {
+        this.showPermissionDialog('离线下载');
+        return;
+      }
+
+      let url;
+      try {
+        url = await this.showInputPrompt('离线下载', '请输入文件的下载链接（http/https）');
+      } catch (e) {
+        return; // 用户取消
+      }
+      url = (url || '').trim();
+      if (!url) return;
+      if (!/^https?:\/\//i.test(url)) {
+        this.showCustomToast('只支持 http/https 链接', 'warning');
+        return;
+      }
+
+      this.centerProgress = { visible: true, text: '服务器正在下载文件，请不要关闭页面...', fileName: url };
+      let saved = null;
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        const savedCredentials = localStorage.getItem('authCredentials');
+        if (savedCredentials) headers['Authorization'] = `Basic ${savedCredentials}`;
+
+        const response = await fetch('/api/write/fetch', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ url, dir: this.cwd })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.key) {
+          if (response.status === 401 || response.status === 403) {
+            this.showPermissionDialog('离线下载');
+            return;
+          }
+          throw new Error(data.error || `服务器返回 ${response.status}`);
+        }
+        saved = data;
+      } catch (error) {
+        this.showCustomToast('离线下载失败: ' + (error.message || '未知错误'), 'error');
+        return;
+      } finally {
+        this.centerProgress = { visible: false, text: '', fileName: '' };
+      }
+
+      const name = saved.key.split('/').pop();
+      this.showCustomToast(`已保存 "${name}"（${this.formatSize(saved.size)}）`, 'success');
+      await this.fetchFiles();
+      // 图片/视频顺手生成缩略图
+      if (this.canRegenerateThumbnail(saved.key)) {
+        await this.regenerateThumbnail({ key: saved.key });
+      }
+    },
+
     copyLink(link) {
       const url = new URL(link, window.location.origin);
       navigator.clipboard.writeText(url.toString());
@@ -1113,7 +1255,7 @@ export default {
         headers['Authorization'] = `Basic ${savedCredentials}`;
       }
 
-      fetch(`/api/children/${this.cwd}`, { headers })
+      return fetch(`/api/children/${this.cwd}`, { headers })
         .then((res) => res.json())
         .then((data) => {
           if (data.needLogin) {
@@ -1126,6 +1268,7 @@ export default {
           }
 
           this.needLogin = false;
+          this.registerRawToken(data);
           this.files = data.value || [];
           this.folders = data.folders || [];
           this.isGuest = data.isGuest || false;
@@ -1528,7 +1671,7 @@ export default {
       try {
         for (const fileKey of this.selectedFiles) {
           const link = document.createElement('a');
-          link.href = `/raw/${fileKey}`;
+          link.href = this.rawUrl(fileKey);
           link.download = fileKey.split('/').pop();
           document.body.appendChild(link);
           link.click();
@@ -1938,7 +2081,7 @@ export default {
         this.cwd = directory;
       } else {
         // 普通非媒体文件：直接预览/下载
-        this.preview(`/raw/${file.key}`);
+        this.preview(this.rawUrl(file.key));
       }
     },
 
@@ -1983,7 +2126,7 @@ export default {
       // 为每个媒体文件添加预览URL
       mediaList = mediaList.map(file => ({
         ...file,
-        url: `/raw/${file.key}`,
+        url: this.rawUrl(file.key),
         name: file.key.split('/').pop(),
         size: file.size
       }));
@@ -2317,7 +2460,8 @@ export default {
         // 直接基于网络地址生成缩略图：浏览器会按需分段（Range）请求，
         // 不用先把整个文件下载到内存里再解码，大文件也能较快出结果。
         // 加时间戳避免读到修复前的缓存响应。
-        const srcUrl = `/raw/${key}?t=${Date.now()}`;
+        const signedUrl = this.rawUrl(key);
+        const srcUrl = `${signedUrl}${signedUrl.includes('?') ? '&' : '?'}t=${Date.now()}`;
         const thumbnailBlob = await generateThumbnailFromUrl(srcUrl, guessedType);
         if (!thumbnailBlob) throw new Error('未能从文件中生成缩略图');
 
@@ -2350,7 +2494,7 @@ export default {
       
       try {
         const link = document.createElement('a');
-        link.href = `/raw/${key}`;
+        link.href = this.rawUrl(key);
         link.download = key.split('/').pop();
         link.click();
         this.showCustomToast(`开始下载文件`, 'success');
@@ -2725,12 +2869,13 @@ export default {
 
         const response = await fetch(url, { headers });
         const data = await response.json();
+        this.registerRawToken(data);
 
         // 添加文件
-        items.push(...data.value);
+        items.push(...(data.value || []));
 
         // 处理子目录
-        for (const folder of data.folders) {
+        for (const folder of (data.folders || [])) {
           // 添加目录标记
           items.push({
             key: folder + '_$folder$',
@@ -2795,6 +2940,7 @@ export default {
 
         const response = await fetch(`/api/children/${directory}`, { headers });
         const data = await response.json();
+        this.registerRawToken(data);
 
         if (data.needLogin) {
           return results;

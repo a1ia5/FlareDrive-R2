@@ -1,0 +1,229 @@
+// 离线下载：POST /api/write/fetch  { url, dir, filename? }
+// 由服务端抓取一个外部 URL，保存到指定目录。调用者必须对目标目录有写权限。
+
+import { getBucket } from "@/utils/bucket";
+import { checkPathPermission, isSafeKey, isInternalPath, FOLDER_MARKER } from "@/utils/auth";
+import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
+import { pickContentType, guessContentType } from "@/utils/response";
+
+const MAX_REDIRECTS = 5;
+const DEFAULT_MAX_BYTES = 1024 * 1024 * 1024; // 1 GiB
+const MAX_BUFFERED_BYTES = 64 * 1024 * 1024; // 响应没有 Content-Length 时只能读进内存
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+// SSRF 防护：只允许 http/https、默认端口之外不限制，但拒绝本机、内网、
+// 链路本地地址和本站自身（否则可以借服务端身份访问本站接口）。
+export function checkTargetUrl(raw: string, selfHost: string): { ok: true; url: URL } | { ok: false; reason: string } {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { ok: false, reason: "URL 格式不正确" };
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, reason: "只支持 http/https 链接" };
+  if (url.username || url.password) return { ok: false, reason: "不支持带账户密码的链接" };
+
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!host) return { ok: false, reason: "URL 格式不正确" };
+  if (host === selfHost.toLowerCase()) return { ok: false, reason: "不能下载本站地址" };
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
+    return { ok: false, reason: "不允许访问内部地址" };
+  }
+
+  // IPv4 字面量（URL 解析后十进制/十六进制写法都已规范成点分十进制）
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = [parseInt(v4[1], 10), parseInt(v4[2], 10)];
+    const blocked =
+      a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 192 && b === 0) ||
+      (a === 198 && (b === 18 || b === 19));
+    if (blocked) return { ok: false, reason: "不允许访问内部地址" };
+  }
+
+  // IPv6 字面量：回环、未指定、ULA、链路本地、IPv4 映射一律拒绝
+  if (host.includes(":")) {
+    if (
+      host === "::" || host === "::1" ||
+      /^f[cd]/.test(host) || /^fe[89ab]/.test(host) ||
+      host.startsWith("::ffff:") || host.startsWith("64:ff9b:")
+    ) {
+      return { ok: false, reason: "不允许访问内部地址" };
+    }
+  }
+
+  return { ok: true, url };
+}
+
+export function sanitizeFilename(name: string): string {
+  let n = (name || "").replace(/[\u0000-\u001f\u007f]/g, "").replace(/[\\/]/g, "_").trim();
+  n = n.replace(/^\.+/, "");
+  if (n.length > 200) {
+    const dot = n.lastIndexOf(".");
+    const ext = dot > 0 && n.length - dot <= 12 ? n.slice(dot) : "";
+    n = n.slice(0, 200 - ext.length) + ext;
+  }
+  return n;
+}
+
+export function filenameFromResponse(url: URL, contentDisposition: string | null): string {
+  if (contentDisposition) {
+    const star = contentDisposition.match(/filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/);
+    if (star) {
+      try {
+        const n = sanitizeFilename(decodeURIComponent(star[1].trim()));
+        if (n) return n;
+      } catch {}
+    }
+    const plain = contentDisposition.match(/filename\s*=\s*("([^"]*)"|[^;]+)/);
+    if (plain) {
+      const n = sanitizeFilename((plain[2] !== undefined ? plain[2] : plain[1]).trim());
+      if (n) return n;
+    }
+  }
+  const last = url.pathname.split("/").filter(Boolean).pop() || "";
+  let decoded = last;
+  try {
+    decoded = decodeURIComponent(last);
+  } catch {}
+  return sanitizeFilename(decoded) || "download";
+}
+
+async function fetchFollowingRedirects(start: URL, selfHost: string): Promise<{ res: Response; finalUrl: URL } | { error: string }> {
+  let current = start;
+  for (let i = 0; i <= MAX_REDIRECTS; i++) {
+    const res = await fetch(current.toString(), {
+      method: "GET",
+      redirect: "manual", // 每一跳都要重新过一遍地址检查
+      headers: { "User-Agent": "FlareDrive-R2 fetcher", Accept: "*/*" },
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.get("Location")) {
+      let next: URL;
+      try {
+        next = new URL(res.headers.get("Location"), current);
+      } catch {
+        return { error: "重定向地址无效" };
+      }
+      const check = checkTargetUrl(next.toString(), selfHost);
+      if (check.ok === false) return { error: "重定向目标被拒绝：" + check.reason };
+      current = check.url;
+      continue;
+    }
+    return { res, finalUrl: current };
+  }
+  return { error: "重定向次数过多" };
+}
+
+export async function onRequestPost(context) {
+  if (isCrossOriginRequest(context)) return crossOriginRejectedResponse();
+
+  let body: { url?: string; dir?: string; filename?: string } = {};
+  try {
+    body = await context.request.json();
+  } catch {
+    return json({ error: "请求格式错误" }, 400);
+  }
+
+  let dir = typeof body.dir === "string" ? body.dir : "";
+  if (dir && !dir.endsWith("/")) dir += "/";
+  if (dir && (!isSafeKey(dir) || isInternalPath(dir))) return json({ error: "目标目录无效" }, 400);
+
+  // 先校验权限，再发起任何外部请求
+  if (!(await checkPathPermission(context, dir + "probe", true))) {
+    return json({ error: "没有该目录的写入权限" }, 401);
+  }
+
+  const selfHost = new URL(context.request.url).hostname;
+  const check = checkTargetUrl(typeof body.url === "string" ? body.url.trim() : "", selfHost);
+  if (check.ok === false) return json({ error: check.reason }, 400);
+
+  const bucket = getBucket(context);
+  if (!bucket) return json({ error: "存储桶未配置" }, 500);
+
+  let res: Response;
+  let finalUrl: URL;
+  try {
+    const fetched = await fetchFollowingRedirects(check.url, selfHost);
+    if ("error" in fetched) return json({ error: fetched.error }, 400);
+    res = fetched.res;
+    finalUrl = fetched.finalUrl;
+  } catch (e) {
+    return json({ error: "无法连接到目标地址" }, 502);
+  }
+  if (!res.ok || !res.body) {
+    return json({ error: `目标地址返回了 HTTP ${res.status}` }, 502);
+  }
+
+  const requested = typeof body.filename === "string" ? sanitizeFilename(body.filename) : "";
+  const filename = requested || filenameFromResponse(finalUrl, res.headers.get("Content-Disposition"));
+  if (!isSafeKey(dir + filename) || filename === FOLDER_MARKER) return json({ error: "文件名无效" }, 400);
+
+  // 同名文件已存在时不覆盖，改名为 "name (1).ext"
+  let key = dir + filename;
+  for (let n = 1; n <= 50 && (await bucket.head(key)); n++) {
+    const dot = filename.lastIndexOf(".");
+    key = dot > 0
+      ? `${dir}${filename.slice(0, dot)} (${n})${filename.slice(dot)}`
+      : `${dir}${filename} (${n})`;
+  }
+  if (!(await checkPathPermission(context, key, true))) return json({ error: "没有该目录的写入权限" }, 401);
+
+  const maxBytes = Math.max(1, parseInt(context.env["FETCH_MAX_SIZE"] || "", 10) || DEFAULT_MAX_BYTES);
+  const lengthHeader = res.headers.get("Content-Length");
+  const length = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? parseInt(lengthHeader, 10) : null;
+  const encoded = !!res.headers.get("Content-Encoding"); // 压缩过的响应，Content-Length 不是解压后的长度
+
+  if (length !== null && length > maxBytes) {
+    return json({ error: `文件过大（${length} 字节），上限为 ${maxBytes} 字节` }, 413);
+  }
+
+  // 下载站返回的 Content-Type 经常不准（例如把视频标成 text/plain），
+  // 后缀能识别时以后缀为准，预览和缩略图都依赖这个类型。
+  const contentType = guessContentType(key) || pickContentType(res.headers.get("Content-Type"), key);
+  const options = { httpMetadata: contentType ? { contentType } : undefined };
+
+  try {
+    let object;
+    if (length !== null && !encoded) {
+      // 已知长度：边下边写，不占内存
+      object = await bucket.put(key, res.body, options);
+    } else {
+      // 未知长度：R2 的流式写入要求事先知道长度，只能先读进内存，所以上限小得多
+      const limit = Math.min(maxBytes, MAX_BUFFERED_BYTES);
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > limit) {
+          await reader.cancel();
+          return json({ error: `目标地址没有提供文件大小，这种情况下最多只能下载 ${limit} 字节` }, 413);
+        }
+        chunks.push(value);
+      }
+      const buffer = new Uint8Array(total);
+      let offset = 0;
+      for (const c of chunks) {
+        buffer.set(c, offset);
+        offset += c.byteLength;
+      }
+      object = await bucket.put(key, buffer, options);
+    }
+    return json({ key: object.key, size: object.size, contentType: contentType || null });
+  } catch (e) {
+    console.error("fetch-url save failed:", e);
+    return json({ error: "保存文件失败，下载可能中途中断" }, 502);
+  }
+}

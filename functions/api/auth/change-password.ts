@@ -1,4 +1,4 @@
-import { resolveAccount } from "@/utils/auth";
+import { resolveAccount, clearAccountCache } from "@/utils/auth";
 import { hasD1, updateD1Password } from "@/utils/d1auth";
 
 function json(obj: unknown, status: number) {
@@ -69,6 +69,7 @@ export async function onRequestPost(context) {
         }
 
         await updateD1Password(context, userInfo.username, newPassword);
+        clearAccountCache();
 
         return json({ success: true, message: "密码修改成功，请使用新密码重新登录" }, 200);
     } catch (error) {

@@ -1,121 +1,95 @@
 import { notFound, parseBucketPath } from "@/utils/bucket";
-import { get_list_auth_status, resolveAccount } from "@/utils/auth";
+import {
+  get_list_auth_status,
+  userCanRead,
+  userCanTraverse,
+  isSafeKey,
+  INTERNAL_PREFIX,
+  THUMBNAIL_PREFIX,
+  FOLDER_MARKER,
+} from "@/utils/auth";
+import { signToken, sessionTokenExpiry } from "@/utils/signing";
+
+const MAX_PAGES = 20; // 每页最多 1000 个对象
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
 
 export async function onRequestGet(context) {
   try {
-    const [bucket, path] = parseBucketPath(context);
+    const [bucket, rawPath] = parseBucketPath(context);
+    if (!bucket) return notFound();
+
+    const path = rawPath.replace(/\/+$/, "");
     const prefix = path && `${path}/`;
-    if (!bucket || prefix.startsWith("_$flaredrive$/")) return notFound();
+    if (prefix.startsWith(INTERNAL_PREFIX)) return notFound();
+    if (prefix && !isSafeKey(prefix)) return notFound();
 
-    // 检查文件列表访问权限
-    const authResult = await get_list_auth_status(context, path || "");
-
+    const authResult = await get_list_auth_status(context, path);
     if (!authResult.hasAccess) {
-      // 没有权限访问，返回需要登录的响应（不包含WWW-Authenticate头，避免弹出浏览器登录框）
-      return new Response(JSON.stringify({
-        needLogin: true,
-        message: "需要登录才能查看文件列表"
-      }), {
-        status: 200, // 改为200状态码，避免触发浏览器登录框
-        headers: {
-          "Content-Type": "application/json"
-        },
+      // 200 + needLogin：不带 WWW-Authenticate，避免弹出浏览器原生登录框
+      return json({ needLogin: true, message: "需要登录才能查看文件列表" });
+    }
+    const user = authResult.user;
+    const env = context.env;
+
+    // 此前只取第一页（最多 1000 个对象），超出的文件既看不到，
+    // 递归删除/移动文件夹时也会被漏掉。
+    const objects: any[] = [];
+    const folderSet = new Set<string>();
+    let cursor: string | undefined = undefined;
+    let truncated = false;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const list = await bucket.list({
+        prefix,
+        delimiter: "/",
+        cursor,
+        include: ["httpMetadata", "customMetadata"],
       });
+      objects.push(...list.objects);
+      for (const p of list.delimitedPrefixes) folderSet.add(p);
+      truncated = !!list.truncated;
+      if (!list.truncated) break;
+      cursor = list.cursor;
     }
 
-    const objList = await bucket.list({
-      prefix,
-      delimiter: "/",
-      include: ["httpMetadata", "customMetadata"],
-    });
+    const value = objects
+      .filter((obj) => !obj.key.endsWith("/" + FOLDER_MARKER) && obj.key !== FOLDER_MARKER)
+      .filter((obj) => userCanRead(user, env, obj.key))
+      .map(({ key, size, uploaded, httpMetadata, customMetadata }) => ({
+        key,
+        size,
+        uploaded,
+        httpMetadata,
+        customMetadata,
+      }));
 
-    let objKeys = objList.objects
-      .filter((obj) => !obj.key.endsWith("/_$folder$"))
-      .map((obj) => {
-        const { key, size, uploaded, httpMetadata, customMetadata } = obj;
-        return { key, size, uploaded, httpMetadata, customMetadata };
-      });
+    const folders = [...folderSet]
+      .filter((folder) => !folder.startsWith(INTERNAL_PREFIX))
+      .filter((folder) => userCanTraverse(user, env, folder));
 
-    let folders = objList.delimitedPrefixes;
-    if (!path)
-      folders = folders.filter((folder) => folder !== "_$flaredrive$/");
+    // 应用内读取 /raw/ 用的签名令牌：覆盖缩略图目录；
+    // 如果当前账户对这个目录本身有读权限，再加上这个目录。
+    const scopes = [THUMBNAIL_PREFIX];
+    if (user && userCanRead(user, env, prefix)) scopes.push(prefix);
+    const expires = sessionTokenExpiry();
+    const rawToken = await signToken(env, bucket, { e: expires, p: scopes });
 
-    // 根据用户权限过滤内容
-    if (!authResult.isGuest) {
-      // 已登录用户：根据用户权限过滤
-      const headers = new Headers(context.request.headers);
-      if(headers.get('Authorization')) {
-        const Authorization = headers.get('Authorization').split("Basic ")[1];
-        const account = atob(Authorization);
-        // 解析用户账户信息（先查 D1，再回退环境变量），只读和普通用户共用同一套过滤逻辑
-        const userInfo = account ? await resolveAccount(account, context) : null;
-
-        if(userInfo && userInfo.exists) {
-          const allow = userInfo.permissions;
-
-          // 如果不是管理员，需要过滤内容
-          if (!allow.includes("*")) {
-            // 获取游客权限，已登录用户也应该能访问游客目录
-            const guestEnv = context.env["GUEST"] || context.env["guest"];
-            const allow_guest = guestEnv ? guestEnv.split(",") : [];
-
-            // 合并用户权限和游客权限
-            const combinedPermissions = [...allow, ...allow_guest];
-
-            // 过滤文件：显示用户有权限的文件 + 游客可访问的文件
-            objKeys = objKeys.filter(file => {
-              for (var a of combinedPermissions) {
-                if (a == "*") return true;
-                if (file.key.startsWith(a)) return true;
-              }
-              return false;
-            });
-
-            // 过滤文件夹：显示用户有权限的文件夹 + 游客可访问的文件夹
-            folders = folders.filter(folder => {
-              for (var a of combinedPermissions) {
-                if (a == "*") return true;
-                if (folder.startsWith(a)) return true;
-              }
-              return false;
-            });
-          }
-        }
-      }
-    } else {
-      // 游客用户：根据游客权限过滤
-      const guestEnv = context.env["GUEST"] || context.env["guest"];
-      if (guestEnv) {
-        const allow_guest = guestEnv.split(",");
-
-        // 过滤文件：只显示游客有权限的文件
-        objKeys = objKeys.filter(file => {
-          for (var aa of allow_guest) {
-            if (aa == "*") return true;
-            if (file.key.startsWith(aa)) return true;
-          }
-          return false;
-        });
-
-        // 过滤文件夹：只显示游客有权限的文件夹
-        folders = folders.filter(folder => {
-          for (var aa of allow_guest) {
-            if (aa == "*") return true;
-            if (folder.startsWith(aa)) return true;
-          }
-          return false;
-        });
-      }
-    }
-
-    return new Response(JSON.stringify({
-      value: objKeys,
+    return json({
+      value,
       folders,
-      isGuest: authResult.isGuest
-    }), {
-      headers: { "Content-Type": "application/json" },
+      isGuest: authResult.isGuest,
+      truncated,
+      rawToken,
+      rawTokenPrefix: scopes.length > 1 ? prefix : null,
+      rawTokenExpires: expires,
     });
   } catch (e) {
-    return new Response(e.toString(), { status: 500 });
+    console.error("children error:", e);
+    return new Response("服务器内部错误", { status: 500 });
   }
 }

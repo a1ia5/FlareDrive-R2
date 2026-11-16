@@ -45,7 +45,7 @@ export default {
       homeUrl: "https://blog.liuyc.uk/about.html",
       blogUrl: "https://blog.liuyc.uk/",
       githubUrl: "https://github.com/marktube",
-      emailUrl: "mailto:liuyanchao99@gmail.com"
+      emailUrl: "mailto:liuyc@sem.tsinghua.edu.cn"
     };
   },
   mounted() {
