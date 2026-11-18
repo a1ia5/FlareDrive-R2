@@ -2368,10 +2368,12 @@ export default {
       // 检查是否是媒体文件
       const imageTypes = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
       const videoTypes = ['mp4', 'webm', 'ogv', 'avi', 'mov', 'wmv'];
+      const audioTypes = ['m4a', 'mp3', 'flac', 'wav', 'ogg', 'aac', 'opus', 'wma'];
       const ext = file.key?.split('.').pop()?.toLowerCase();
       const isImageFile = imageTypes.includes(ext);
       const isVideoFile = videoTypes.includes(ext);
-      const isMediaFile = isImageFile || isVideoFile;
+      const isAudioFile = audioTypes.includes(ext);
+      const isMediaFile = isImageFile || isVideoFile || isAudioFile;
 
       if (isMediaFile) {
         // 媒体文件：打开预览
@@ -2394,9 +2396,11 @@ export default {
       // 确定点击文件的类型
       const imageTypes = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
       const videoTypes = ['mp4', 'webm', 'ogv', 'avi', 'mov', 'wmv'];
+      const audioTypes = ['m4a', 'mp3', 'flac', 'wav', 'ogg', 'aac', 'opus', 'wma'];
       const clickedExt = clickedFile.key?.split('.').pop()?.toLowerCase();
       const isClickedImage = imageTypes.includes(clickedExt);
       const isClickedVideo = videoTypes.includes(clickedExt);
+      const isClickedAudio = audioTypes.includes(clickedExt);
 
       // 确定媒体文件列表和初始索引
       let mediaList = [];
@@ -2411,6 +2415,8 @@ export default {
             return imageTypes.includes(ext);
           } else if (isClickedVideo) {
             return videoTypes.includes(ext);
+          } else if (isClickedAudio) {
+            return audioTypes.includes(ext);
           }
           return false;
         });
@@ -2422,6 +2428,8 @@ export default {
             return imageTypes.includes(ext);
           } else if (isClickedVideo) {
             return videoTypes.includes(ext);
+          } else if (isClickedAudio) {
+            return audioTypes.includes(ext);
           }
           return false;
         });

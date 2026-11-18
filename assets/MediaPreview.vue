@@ -46,6 +46,23 @@
         </video>
       </div>
 
+      <!-- 音频预览 -->
+      <div v-else-if="isAudio" class="audio-viewer">
+        <div class="audio-info">
+          <p class="audio-name">{{ currentMedia.name }}</p>
+        </div>
+        <audio
+          :src="currentMedia.url"
+          class="preview-audio"
+          controls
+          autoplay
+          @loadeddata="onAudioLoad"
+          @error="onAudioError"
+        >
+          您的浏览器不支持音频播放
+        </audio>
+      </div>
+
       <!-- 错误状态 -->
       <div v-else-if="error" class="error-state">
         <svg viewBox="0 0 24 24" width="48" height="48" fill="#ff6b6b">
@@ -274,6 +291,11 @@ export default {
       const ext = this.currentMedia.name?.split('.').pop()?.toLowerCase();
       return videoTypes.includes(ext);
     },
+    isAudio() {
+      const audioTypes = ['m4a', 'mp3', 'flac', 'wav', 'ogg', 'aac', 'opus', 'wma'];
+      const ext = this.currentMedia.name?.split('.').pop()?.toLowerCase();
+      return audioTypes.includes(ext);
+    },
     // 过滤后的媒体列表 - 只包含当前类型的媒体
     filteredMediaList() {
       if (!this.mediaList.length) return [];
@@ -284,9 +306,11 @@ export default {
       const currentExt = currentMedia.name?.split('.').pop()?.toLowerCase();
       const imageTypes = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
       const videoTypes = ['mp4', 'webm', 'ogv', 'avi', 'mov', 'wmv'];
+      const audioTypes = ['m4a', 'mp3', 'flac', 'wav', 'ogg', 'aac', 'opus', 'wma'];
 
       const isCurrentImage = imageTypes.includes(currentExt);
       const isCurrentVideo = videoTypes.includes(currentExt);
+      const isCurrentAudio = audioTypes.includes(currentExt);
 
       if (isCurrentImage) {
         // 如果当前是图片，只返回图片
@@ -299,6 +323,12 @@ export default {
         return this.mediaList.filter(media => {
           const ext = media.name?.split('.').pop()?.toLowerCase();
           return videoTypes.includes(ext);
+        });
+      } else if (isCurrentAudio) {
+        // 如果当前是音频，只返回音频
+        return this.mediaList.filter(media => {
+          const ext = media.name?.split('.').pop()?.toLowerCase();
+          return audioTypes.includes(ext);
         });
       }
 
@@ -384,6 +414,10 @@ export default {
       this.loading = false;
       this.error = false;
     },
+    onAudioLoad() {
+      this.loading = false;
+      this.error = false;
+    },
     onImageError() {
       this.loading = false;
       this.error = true;
@@ -394,6 +428,12 @@ export default {
       this.loading = false;
       this.error = true;
       this.errorMessage = '视频加载失败';
+    },
+    onAudioError() {
+      console.log('音频加载失败:', this.currentMedia.url);
+      this.loading = false;
+      this.error = true;
+      this.errorMessage = '音频加载失败';
     },
     
     // 导航控制
@@ -528,8 +568,10 @@ export default {
       }
     },
 
-    // 检查图片加载状态
+    // 检查图片加载状态（只对图片用 Image 探针；视频/音频由各自
+    // 元素的 loadeddata 事件清掉 loading，避免探针误报错误）
     checkImageLoad() {
+      if (!this.isImage) return;
       if (!this.currentMedia.url) {
         return;
       }
@@ -766,6 +808,36 @@ export default {
 .preview-video {
   max-width: 100%;
   max-height: 100%;
+  outline: none;
+}
+
+/* 音频播放器 */
+.audio-viewer {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 0 20px;
+  box-sizing: border-box;
+}
+
+.audio-info {
+  text-align: center;
+  color: white;
+  max-width: 100%;
+}
+
+.audio-name {
+  margin: 0;
+  font-size: 18px;
+  word-break: break-all;
+}
+
+.preview-audio {
+  width: min(480px, 90vw);
   outline: none;
 }
 
