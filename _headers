@@ -4,4 +4,11 @@
   X-Frame-Options: SAMEORIGIN
   Referrer-Policy: strict-origin-when-cross-origin
   Strict-Transport-Security: max-age=31536000
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdmirror.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://static.zeoseven.com https://cdn.jsdelivr.net; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' https://events.vercount.one; font-src 'self' https://static.zeoseven.com data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'; upgrade-insecure-requests
   ! Access-Control-Allow-Origin
+
+# CSP 说明：这个应用没有构建步骤，index.html 里有内联脚本、vue3-sfc-loader
+# 在浏览器里用 new Function 编译 SFC、addStyle 注入 <style>，所以
+# 'unsafe-inline' 和 'unsafe-eval' 去不掉——CSP 在这里只能做到：脚本只允许
+# 来自本站和两个白名单 CDN，样式只允许本站和白名单域名，禁止 object/embed、
+# 禁止被其他站点嵌套。想收紧到不含 unsafe-*，需要先上构建步骤（把 SFC 预编译）。

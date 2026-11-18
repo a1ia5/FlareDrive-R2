@@ -246,7 +246,8 @@ curl -u "alice:$FLARE_PASS" -X PUT \
 - **内部目录**：`_$flaredrive$/` 下只有 `thumbnails/` 可以通过接口访问，且缩略图文件名必须是 `<sha1>.png`。
 - **复制**：复制源需要读权限，不能借"复制"读取其他目录的文件。
 - **凭据缓存**：通过校验的账户在同一个运行实例内缓存 30 秒以减少 PBKDF2 开销。修改密码后，旧密码在其他实例上最多还能使用 30 秒。
-- **静态资源响应头**：`_headers` 为静态文件加上 HSTS、`X-Frame-Options` 等，并去掉默认的 `Access-Control-Allow-Origin: *`。
+- **静态资源响应头**：`_headers` 为静态文件加上 HSTS、`X-Frame-Options`、CSP 等，并去掉默认的 `Access-Control-Allow-Origin: *`。CDN 脚本和样式带 SRI 哈希（见 `index.html`）；字体 CSS（static.zeoseven.com）没有 SRI——该域名在当前构建环境不可达，如需锁定请自行取哈希补上。CSP 含 `unsafe-inline`/`unsafe-eval`：本应用没有构建步骤，SFC 在浏览器里运行时编译，收紧需要先上构建步骤。
+- **登录凭据存 localStorage**：有意为之（换标签页不用重新登录）；同源脚本注入仍是风险面，上面 CSP + 上传文件强制下载就是对应的缓解。
 
 发现安全问题请提交 issue 或直接联系仓库维护者。
 
