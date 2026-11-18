@@ -42,7 +42,9 @@
 
 1. Fork 本仓库
 2. Cloudflare Pages → 创建项目 → 连接到 Git → 选择仓库
-3. 构建设置全部留空（没有构建步骤）
+3. 构建设置：构建命令填 `mkdir -p dist && cp -r index.html assets _headers _redirects favicon.ico robots.txt 404.html _routes.json dist/`，输出目录填 `dist/`
+
+> **为什么输出目录必须是 `dist/`？** 如果发布目录是仓库根目录，`utils/`、`scripts/`、`migrations/`、`docs/` 下的源码和内部文件会作为静态文件被匿名访问（整个鉴权模型和签名代码都会公开）。仓库里有 `_routes.json` + 对应的 Function 做兜底拦截（访问这些路径返回 404），但这只是权宜之计；正确做法是把发布目录设为 `dist/`，只发布静态文件。`functions/` 目录始终留在仓库根目录，Pages 会自动把它编译成 Functions。
 
 ### 3. 绑定 R2
 
