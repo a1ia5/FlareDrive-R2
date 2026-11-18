@@ -609,10 +609,6 @@
             <button @click="copyShareUrl" style="flex: 1; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">复制链接</button>
             <button @click="showShareDialog = false" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">关闭</button>
           </div>
-          <div style="text-align: center;">
-            <canvas ref="shareQrCanvas" width="200" height="200" style="border: 1px solid #eee;"></canvas>
-            <p style="margin: 8px 0 0 0; color: #666; font-size: 13px;">扫描二维码分享</p>
-          </div>
         </div>
         <p v-if="shareDialog.error" style="color: #dc3545; margin: 10px 0 0 0;" v-text="shareDialog.error"></p>
       </div>
@@ -1215,7 +1211,6 @@ export default {
         dialog.expiresText = data.expiresAt
           ? new Date(data.expiresAt * 1000).toLocaleString('zh-CN')
           : '长期有效';
-        this.$nextTick(() => this.drawShareQR());
       } catch (error) {
         dialog.error = error.message || '生成链接失败';
         this.showCustomToast('生成分享链接失败: ' + dialog.error, 'error');
@@ -1295,41 +1290,6 @@ export default {
       const url = new URL(`/api/zip?dir=${apiPath(prefix)}`, window.location.origin);
       if (best) url.searchParams.set('token', best.token);
       window.open(url.toString(), '_blank');
-    },
-
-    // 把生成的分享链接画成二维码；外部服务不可用时画占位文字，不留空白
-    drawShareQR() {
-      const canvas = this.$refs.shareQrCanvas;
-      if (!canvas) return;
-      const ctx = canvas.getContext('2d');
-      const url = this.shareDialog.url;
-      if (!url) return;
-      const qrcodeApi = window.ENV?.QRCODE_API || '';
-      if (!qrcodeApi) {
-        this.drawQRPlaceholder(ctx, '未配置二维码服务');
-        return;
-      }
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        ctx.clearRect(0, 0, 200, 200);
-        ctx.drawImage(img, 0, 0, 200, 200);
-      };
-      img.onerror = () => this.drawQRPlaceholder(ctx, '二维码生成失败');
-      img.src = `${qrcodeApi}${encodeURIComponent(url)}`;
-    },
-
-    drawQRPlaceholder(ctx, message) {
-      ctx.fillStyle = '#f0f0f0';
-      ctx.fillRect(0, 0, 200, 200);
-      ctx.fillStyle = '#333';
-      ctx.font = '14px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText('二维码', 100, 90);
-      ctx.fillText(message, 100, 110);
-      ctx.font = '12px Arial';
-      ctx.fillStyle = '#666';
-      ctx.fillText('扫码前请先复制上方链接', 100, 130);
     },
 
     async writeClipboard(text) {
