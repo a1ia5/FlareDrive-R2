@@ -580,7 +580,7 @@
           <input
             type="password"
             v-model="shareDialog.password"
-            @change="generateShareLink"
+            @change="onShareOptionsChanged"
             placeholder="留空表示无需密码"
             autocomplete="new-password"
             style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;"
@@ -592,24 +592,24 @@
             type="number"
             min="1"
             v-model="shareDialog.maxDownloads"
-            @change="generateShareLink"
+            @change="onShareOptionsChanged"
             placeholder="留空表示不限次数"
             style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;"
           />
         </div>
-        <div v-if="shareDialog.loading" style="text-align: center; color: #666; padding: 10px 0;">正在生成链接…</div>
-        <div v-else-if="shareDialog.url">
+        <div v-if="shareDialog.url" style="margin-bottom: 12px;">
           <input
             readonly
             :value="shareDialog.url"
             @click="$event.target.select()"
             style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 8px; font-size: 13px;"
           />
-          <p style="margin: 0 0 12px 0; color: #666; font-size: 13px;">有效期至 {{ shareDialog.expiresText }}</p>
-          <div style="display: flex; gap: 10px; margin-bottom: 12px;">
-            <button @click="copyShareUrl" style="flex: 1; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">复制链接</button>
-            <button @click="showShareDialog = false" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">关闭</button>
-          </div>
+          <p style="margin: 0; color: #666; font-size: 13px;">有效期至 {{ shareDialog.expiresText }}</p>
+        </div>
+        <div v-if="shareDialog.loading" style="text-align: center; color: #666; padding: 10px 0;">正在生成链接…</div>
+        <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+          <button @click="copyShareUrl" :disabled="shareDialog.loading" style="flex: 1; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">复制链接</button>
+          <button @click="showShareDialog = false" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">关闭</button>
         </div>
         <p v-if="shareDialog.error" style="color: #dc3545; margin: 10px 0 0 0;" v-text="shareDialog.error"></p>
       </div>
@@ -1185,13 +1185,18 @@ export default {
         error: ''
       };
       this.showShareDialog = true;
-      this.generateShareLink();
     },
 
     setShareDays(days) {
       if (this.shareDialog.days === days || this.shareDialog.loading) return;
       this.shareDialog.days = days;
-      this.generateShareLink();
+      this.onShareOptionsChanged();
+    },
+
+    // 选项变化时：如果本轮已生成过链接，重新生成（带 replaceId，旧链接作废）；
+    // 还没生成过时只改本地选项，不发请求——分享只在点“复制链接”时才创建。
+    onShareOptionsChanged() {
+      if (this.shareDialog.url) this.generateShareLink();
     },
 
     // D1：向服务端申请一个有状态的短分享链接（POST /api/shares），返回
@@ -1236,11 +1241,21 @@ export default {
       }
     },
 
-    // 把对话框里显示的链接复制到剪贴板（失败时报错，不报假成功）
+    // 点“复制链接”时才真正创建分享：先 POST 生成链接，再复制到剪贴板，
+    // 成功后关闭对话框。创建失败时报错并不关闭；复制失败时也不关闭，
+    // 链接已生成，用户可以重试。创建进行中禁止重复提交。
     async copyShareUrl() {
+      const dialog = this.shareDialog;
+      if (dialog.loading) return;
+      if (!dialog.url) {
+        await this.generateShareLink();
+        // 生成失败：generateShareLink 已设置 dialog.error 并提示过
+        if (!dialog.url) return;
+      }
       try {
-        await this.writeClipboard(this.shareDialog.url);
+        await this.writeClipboard(dialog.url);
         this.showCustomToast('分享链接已复制到剪贴板', 'success');
+        this.showShareDialog = false;
       } catch (error) {
         this.showCustomToast('复制失败：浏览器拒绝写入剪贴板', 'error');
       }
