@@ -8,7 +8,8 @@
     <script src="https://cdn.jsdelivr.net/npm/axios@0.27.2/dist/axios.min.js" integrity="sha384-vmbbJNC6Li6w5GzrydJ5cd4ttMcLJ/Nl5xgp5saZ5QV8fp7zdsrFDcCasGqOFlaC" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/vue3-sfc-loader@0.9.5/dist/vue3-sfc-loader.min.js" integrity="sha384-sm0K7hTb0FAFlXbxgukZ7QldrlFIFbHc889JQ3bzkKLLFa07xXwSuvwrxrXLNyfT" crossorigin="anonymous"></script>
     <!-- 字体 CSS 没有 integrity：static.zeoseven.com 在当前构建环境不可达，无法计算哈希；如需锁定，改用本地字体或从可达网络取哈希后补上 -->
-    <link rel='stylesheet' href='https://static.zeoseven.com/zsft/243/main/result.css' />
+    <!-- 字体 CSS 改为非阻塞加载：页面先用系统字体渲染，字体到了再换，避免首屏被字体请求拖住 -->
+    <link rel='stylesheet' href='https://static.zeoseven.com/zsft/243/main/result.css' media='print' onload="this.media='all'" />
     <link rel="prefetch" href="/assets/main.mjs" />
     <link rel="stylesheet" href="/assets/main.css" />
     <link rel="manifest" href="/assets/manifest.json" />
