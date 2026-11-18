@@ -243,6 +243,15 @@ button.circle {
   background-color: rgb(195, 195, 195);
 }
 
+.contextmenu-list > li > *:disabled {
+  color: #aaa;
+  cursor: not-allowed;
+}
+
+.contextmenu-list > li > *:disabled:hover {
+  background-color: whitesmoke;
+}
+
 button {
   background: none;
   border: none;

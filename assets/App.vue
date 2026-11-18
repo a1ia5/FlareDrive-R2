@@ -460,7 +460,7 @@
           </button>
         </li>
         <li>
-          <button @click="openShareDialog(focusedItem.key)">
+          <button @click="openShareDialog(focusedItem.key)" :disabled="isGuest">
             <span>分享</span>
           </button>
         </li>
