@@ -222,8 +222,10 @@ export function userCanWrite(user: UserInfo | null, env, path: string): boolean 
         return isThumbnailKey(path);
     }
     if (matchPrefixes(user.permissions, path)) return true;
-    // GUEST 目录对已登录的可写用户同样开放写入
-    return matchPrefixes(getGuestDirs(env), path);
+    // GUEST 目录不再默认开放写入：写权限只来自账户自身的 permissions
+    // 列表；需要写 GUEST 目录的账户必须被显式授予该目录，否则即使是
+    // 读写账户也写不了（2026-11-19 站主确认：默认开放写入不是想要的行为）。
+    return false;
 }
 
 // 目录 dirPrefix（"" 或以 "/" 结尾）本身不可读，但它的某个下级目录可读时，
