@@ -663,6 +663,8 @@ button {
   min-width: 120px;
   position: relative;
   transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
 }
 
 /* 调整搜索框样式 */
@@ -670,11 +672,34 @@ input[type="search"].search-input {
   background-color: whitesmoke;
   border: none;
   border-radius: 16px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: 8px 12px;
-  margin-right: 10px;
+  margin-right: 8px;
   box-sizing: border-box;
   transition: all 0.3s ease;
+}
+
+/* 搜索按钮（点击或回车触发搜索，输入时不再自动搜索） */
+.search-button {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background-color: whitesmoke;
+  transition: background-color 0.2s ease;
+}
+
+.search-button:hover:not(:disabled) {
+  background-color: rgb(220, 220, 220);
+}
+
+.search-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* 移动端搜索框优化 */
