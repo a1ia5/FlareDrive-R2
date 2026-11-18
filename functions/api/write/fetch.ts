@@ -7,7 +7,9 @@ import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf"
 import { pickContentType, guessContentType } from "@/utils/response";
 
 const MAX_REDIRECTS = 5;
-const DEFAULT_MAX_BYTES = 1024 * 1024 * 1024; // 1 GiB
+// D3：默认上限从 1 GiB 降到 256 MiB——1 GiB 的文件走 Worker 流式下载很容易
+// 超时，用户的实际文件都不大；需要更大时用 FETCH_MAX_SIZE 环境变量调高。
+const DEFAULT_MAX_BYTES = 256 * 1024 * 1024; // 256 MiB
 const MAX_BUFFERED_BYTES = 64 * 1024 * 1024; // 响应没有 Content-Length 时只能读进内存
 
 function json(data, status = 200) {
@@ -19,6 +21,9 @@ function json(data, status = 200) {
 
 // SSRF 防护：只允许 http/https、默认端口之外不限制，但拒绝本机、内网、
 // 链路本地地址和本站自身（否则可以借服务端身份访问本站接口）。
+// M1 注：Workers 无法做 DNS 查询（fetch 时才解析），所以这里只能检查 URL
+// 字符串——这是上限，不是完整防护：一个解析到内网地址的域名是拦不住的。
+// 另外拦掉已知的本站来源（*.pages.dev 和本站注册域名的全部子域名）。
 export function checkTargetUrl(raw: string, selfHost: string): { ok: true; url: URL } | { ok: false; reason: string } {
   let url: URL;
   try {
@@ -32,6 +37,12 @@ export function checkTargetUrl(raw: string, selfHost: string): { ok: true; url: 
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (!host) return { ok: false, reason: "URL 格式不正确" };
   if (host === selfHost.toLowerCase()) return { ok: false, reason: "不能下载本站地址" };
+  // 本站的 Pages 默认域名和注册域名下的全部子域名都不能下
+  if (host.endsWith(".pages.dev")) return { ok: false, reason: "不能下载本站地址" };
+  const registrable = registrableDomain(selfHost);
+  if (registrable && (host === registrable || host.endsWith("." + registrable))) {
+    return { ok: false, reason: "不能下载本站地址" };
+  }
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
     return { ok: false, reason: "不允许访问内部地址" };
   }
@@ -63,6 +74,18 @@ export function checkTargetUrl(raw: string, selfHost: string): { ok: true; url: 
   }
 
   return { ok: true, url };
+}
+
+// 取注册域名（最后两段，如 flaredrive.liuyc.uk -> liuyc.uk）。IP、localhost
+// 和单段主机名返回 null。注意：co.uk 这类多级公共后缀会被误判（把
+// "example.co.uk" 当成注册域名是准的，但本站域名本身若是 "x.co.uk"，
+// 这里会拦掉整个 co.uk——对本站来说只是过度拦截，不影响安全）。
+function registrableDomain(host: string): string | null {
+  const h = host.toLowerCase().replace(/\.$/, "");
+  if (!h || h === "localhost" || h.includes(":") || /^\d+\.\d+\.\d+\.\d+$/.test(h)) return null;
+  const parts = h.split(".");
+  if (parts.length < 2) return null;
+  return parts.slice(-2).join(".");
 }
 
 export function sanitizeFilename(name: string): string {
@@ -195,8 +218,29 @@ export async function onRequestPost(context) {
   try {
     let object;
     if (length !== null && !encoded) {
-      // 已知长度：边下边写，不占内存
-      object = await bucket.put(key, res.body, options);
+      // 已知长度：边下边写，不占内存。M2：流也要逐字节计数——只靠声明的
+      // Content-Length 拦不住谎报长度的服务端（声明小、实际多发）。
+      let sizeExceeded = false;
+      let total = 0;
+      const counted = res.body.pipeThrough(
+        new TransformStream({
+          transform(chunk, controller) {
+            total += chunk.byteLength;
+            if (total > maxBytes) {
+              sizeExceeded = true;
+              controller.error(new Error("size"));
+            } else {
+              controller.enqueue(chunk);
+            }
+          },
+        })
+      );
+      try {
+        object = await bucket.put(key, counted, options);
+      } catch (e) {
+        if (sizeExceeded) return json({ error: `文件过大，上限为 ${maxBytes} 字节` }, 413);
+        throw e;
+      }
     } else {
       // 未知长度：R2 的流式写入要求事先知道长度，只能先读进内存，所以上限小得多
       const limit = Math.min(maxBytes, MAX_BUFFERED_BYTES);
