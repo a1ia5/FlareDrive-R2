@@ -12,7 +12,7 @@
         <span v-text="Math.round(uploadProgress) + '%'" style="font-size: 13px; color: #555;"></span>
       </div>
     </div>
-    <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder" @createTextFile="createTextFile" @fetchUrl="fetchFromUrl"></UploadPopup>
+    <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder" @fetchUrl="fetchFromUrl"></UploadPopup>
 
 
 
@@ -1492,33 +1492,6 @@ export default {
       } catch (error) {
         if (error === null) return; // 用户取消
         this.showCustomToast('创建文件夹失败: ' + (error.message || '未知错误'), 'error');
-      }
-    },
-
-    // 新建一个空文本文档（D4）。同名时自动加序号，避免覆盖已有文件。
-    async createTextFile() {
-      if (!this.canWrite) {
-        this.showPermissionDialog('新建文本文档');
-        return;
-      }
-      this.showUploadPopup = false;
-      const existing = new Set(this.files.map((f) => f.key));
-      let name = '新建文本文档.txt';
-      for (let n = 1; existing.has(this.cwd + name); n++) {
-        name = `新建文本文档 (${n}).txt`;
-      }
-      try {
-        await axios.put(`/api/write/items/${apiPath(this.cwd + name)}`, "", {
-          headers: { "Content-Type": "text/plain" },
-        });
-        this.fetchFiles();
-        this.showCustomToast(`已创建 "${name}"`, 'success');
-      } catch (error) {
-        if (error.isAuthError || error?.response?.status === 401 || error?.response?.status === 403) {
-          this.showPermissionDialog('新建文本文档');
-          return;
-        }
-        this.showCustomToast('新建文本文档失败: ' + (error.message || '未知错误'), 'error');
       }
     },
 
