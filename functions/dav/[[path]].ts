@@ -25,6 +25,7 @@ import {
 } from "@/utils/auth";
 import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 import { applyObjectSecurityHeaders, formatContentRange, pickContentType } from "@/utils/response";
+import { deleteUnreferencedThumbnails } from "@/utils/thumbnails";
 import { encodeKeyForUrl } from "@/utils/signing";
 
 const DAV_BASE = "/dav/";
@@ -79,18 +80,29 @@ async function resolve(bucket, path: string, wantDir: boolean): Promise<Resource
 // 拒绝操作（返回 507），而不是对不完整的 key 集合执行删除/复制。
 const LIST_ALL_MAX_PAGES = 20;
 
-async function listAllKeys(bucket, prefix: string): Promise<{ keys: string[]; truncated: boolean }> {
+// N1：withMetadata 为 true 时顺带收集各对象的 customMetadata.thumbnail
+// 摘要（供目录删除时清理缩略图），一次列表拿到 key 和摘要。
+async function listAllKeys(
+  bucket,
+  prefix: string,
+  withMetadata = false
+): Promise<{ keys: string[]; truncated: boolean; digests: string[] }> {
   const keys: string[] = [];
+  const digests: string[] = [];
   let cursor: string | undefined = undefined;
   let truncated = false;
   for (let page = 0; page < LIST_ALL_MAX_PAGES; page++) {
-    const list = await bucket.list({ prefix, cursor });
-    for (const o of list.objects) keys.push(o.key);
+    const list = await bucket.list({ prefix, cursor, include: withMetadata ? ["customMetadata"] : undefined });
+    for (const o of list.objects) {
+      keys.push(o.key);
+      const d = o.customMetadata?.thumbnail;
+      if (withMetadata && typeof d === "string") digests.push(d);
+    }
     truncated = !!list.truncated;
     if (!list.truncated) break;
     cursor = list.cursor;
   }
-  return { keys, truncated };
+  return { keys, truncated, digests };
 }
 
 async function deleteKeys(bucket, keys: string[]): Promise<void> {
@@ -263,16 +275,22 @@ async function deleteResource(context, bucket, user: UserInfo, path: string, wan
 
   if (res.kind === "file") {
     if (!userCanWrite(user, context.env, path)) return text(403, "没有写入权限");
+    // N1：resolve() 里已经 head 过，缩略图摘要直接取现成的。
+    const digest = res.object?.customMetadata?.thumbnail ?? null;
     await bucket.delete(path);
+    // 删缩略图是尽力而为：摘要被其他文件共享时不删，清理失败也不影响 204。
+    if (digest) await deleteUnreferencedThumbnails(bucket, [digest], [path]);
     return text(204);
   }
 
   const prefix = path + "/";
   if (!userCanWrite(user, context.env, prefix)) return text(403, "没有写入权限");
   // L11：目录过大时拒绝删除，而不是删掉不完整的 key 集合后报成功
-  const { keys, truncated } = await listAllKeys(bucket, prefix);
+  // N1：一次列表同时拿到 key 和缩略图摘要（删完就读不到了）。
+  const { keys, truncated, digests } = await listAllKeys(bucket, prefix, true);
   if (truncated) return text(507, "目录过大，无法完整删除，请分批操作");
   await deleteKeys(bucket, keys);
+  await deleteUnreferencedThumbnails(bucket, digests, keys);
   return text(204);
 }
 

@@ -1,5 +1,6 @@
 import { notFound, parseBucketPath } from "@/utils/bucket";
 import { get_auth_status, checkPathPermission, isInternalPath, isThumbnailKey, isSafeKey } from "@/utils/auth";
+import { deleteUnreferencedThumbnails } from "@/utils/thumbnails";
 import { pickContentType } from "@/utils/response";
 import {isCrossOriginRequest, crossOriginRejectedResponse} from "@/utils/csrf";
 
@@ -260,6 +261,18 @@ export async function onRequestDelete(context) {
   }
   if (!bucket) return notFound();
 
+  // N1：先读原文件的缩略图摘要（删完就读不到了）。删缩略图是尽力而为：
+  // 摘要被其他文件（重命名/复制/重复上传）共享时不删，清理失败也不
+  // 影响本次删除的 204。
+  let digest: string | null = null;
+  try {
+    const obj = await bucket.head(path);
+    digest = obj?.customMetadata?.thumbnail ?? null;
+  } catch {
+    // 没有元数据就按无缩略图处理。
+  }
+
   await bucket.delete(path);
+  if (digest) await deleteUnreferencedThumbnails(bucket, [digest], [path]);
   return new Response(null, { status: 204 });
 }
