@@ -11,7 +11,7 @@
 // R2 的 _$flaredrive$/signing-secret（该路径任何接口都读不到）。
 // 更换/删除密钥会让所有已签发的链接立即失效。
 
-import { INTERNAL_PREFIX } from "./auth";
+import { INTERNAL_PREFIX, isSafeKey } from "./auth";
 
 const SECRET_KEY_PATH = INTERNAL_PREFIX + "signing-secret";
 
@@ -114,10 +114,15 @@ export async function verifyToken(env, bucket, token: string, path: string): Pro
   if (!ok) return false;
 
   if (typeof payload?.e !== "number" || payload.e < Math.floor(Date.now() / 1000)) return false;
+  // V8/L1：路径必须安全（拒绝 ".." 等），目录前缀按目录边界匹配。
+  // 没有末尾 "/" 的前缀要补上，否则 "openclaw" 会误匹配到 "openclaw2/..."。
+  if (!isSafeKey(path)) return false;
   if (typeof payload.f === "string" && payload.f === path) return true;
   if (Array.isArray(payload.p)) {
     for (const prefix of payload.p) {
-      if (typeof prefix === "string" && path.startsWith(prefix)) return true;
+      if (typeof prefix !== "string" || !prefix) continue;
+      const dirPrefix = prefix.endsWith("/") ? prefix : prefix + "/";
+      if (path.startsWith(dirPrefix)) return true;
     }
   }
   return false;

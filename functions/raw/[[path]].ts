@@ -1,5 +1,5 @@
 import { notFound, parseBucketPath } from "@/utils/bucket";
-import { getRequestUser, userCanRead, isInternalPath, isThumbnailKey } from "@/utils/auth";
+import { getRequestUser, userCanRead, isInternalPath, isThumbnailKey, isSafeKey } from "@/utils/auth";
 import { verifyToken } from "@/utils/signing";
 import { applyObjectSecurityHeaders, formatContentRange } from "@/utils/response";
 
@@ -9,6 +9,9 @@ import { applyObjectSecurityHeaders, formatContentRange } from "@/utils/response
 //   3. 请求带 Authorization: Basic 且账户对该路径有读权限（curl、脚本）。
 // _$flaredrive$/ 下除缩略图外的内容永远不可读。
 async function canRead(context, bucket, path: string): Promise<boolean> {
+  // L1：路径本身必须安全（拒绝 ".."、"."、空段等），否则 "a/../b" 会让
+  // startsWith 前缀判断和用户看到的目录结构对不上。
+  if (!isSafeKey(path)) return false;
   const internal = isInternalPath(path);
   if (internal && !isThumbnailKey(path)) return false;
 

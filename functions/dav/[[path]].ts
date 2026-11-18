@@ -295,7 +295,8 @@ function parseDestination(context): { path: string; wantDir: boolean } | null {
   } catch {
     return null;
   }
-  if (url.host !== reqUrl.host) return null;
+  // V6：比较整个 origin（协议 + 域名 + 端口），不只比较域名
+  if (url.origin !== reqUrl.origin) return null;
   if (!url.pathname.startsWith(DAV_BASE)) return null;
   let decoded: string;
   try {
@@ -469,14 +470,15 @@ export async function onRequest(context) {
   const request: Request = context.request;
   const method = request.method.toUpperCase();
 
-  if (method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: davHeaders({ Allow: ALLOW, "Content-Length": "0" }) });
-  }
-
   if (WRITE_METHODS.has(method) && isCrossOriginRequest(context)) return crossOriginRejectedResponse();
 
   const user = await getRequestUser(context);
   if (!user) return unauthorized();
+
+  // V5：OPTIONS 也要先通过认证，不再匿名返回 Allow 列表
+  if (method === "OPTIONS") {
+    return new Response(null, { status: 200, headers: davHeaders({ Allow: ALLOW, "Content-Length": "0" }) });
+  }
 
   const bucket = getBucket(context);
   if (!bucket) return text(500, "存储桶未配置");

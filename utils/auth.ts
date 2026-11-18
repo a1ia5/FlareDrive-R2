@@ -228,8 +228,14 @@ export function userCanWrite(user: UserInfo | null, env, path: string): boolean 
 
 // 目录 dirPrefix（"" 或以 "/" 结尾）本身不可读，但它的某个下级目录可读时，
 // 允许"路过"——用于在根目录等上级目录里显示出有权限的子目录。
+// V7 注：双向判定是故意的（"路过"功能），不能按审计建议改成单向——只拥有
+// "openclaw/sub/" 权限的用户需要靠反向判定进入上级目录 "openclaw/" 才能
+// 导航到自己的子目录。真正的收紧在下面：dirPrefix 在函数内规范成目录边界
+// （补末尾 "/"），否则不带 "/" 的 dirPrefix 会让 "openclaw" 误匹配到
+// "openclaw2/"（同级目录混淆）。
 export function userCanTraverse(user: UserInfo | null, env, dirPrefix: string): boolean {
     if (isInternalPath(dirPrefix)) return false;
+    if (dirPrefix && !dirPrefix.endsWith("/")) dirPrefix += "/";
     const all = [...getGuestDirs(env), ...(user ? user.permissions.map(normalizePrefix) : [])];
     for (const p of all) {
         if (!p) continue;
