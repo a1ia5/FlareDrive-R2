@@ -187,7 +187,7 @@
             { text: '按照大小递增排序' },
             { text: '按照大小递减排序' },
             { text: '粘贴文件到此目录', disabled: !clipboard || !canWrite },
-            { text: '管理分享链接', disabled: !isLoggedIn }
+            { text: '管理分享链接', disabled: !isLoggedIn || isReadOnlyUser }
           ]"
           @click="onMenuClick" />
         </div>
@@ -454,7 +454,7 @@
           </button>
         </li>
         <li>
-          <button @click="copyFile(focusedItem.key)" :disabled="isGuest">
+          <button @click="copyFile(focusedItem.key)" :disabled="isGuest || isReadOnlyUser">
             <span>复制</span>
           </button>
         </li>
@@ -464,7 +464,7 @@
           </button>
         </li>
         <li>
-          <button @click="openShareDialog(focusedItem.key)" :disabled="isGuest">
+          <button @click="openShareDialog(focusedItem.key)" :disabled="isGuest || isReadOnlyUser">
             <span>分享</span>
           </button>
         </li>
@@ -492,6 +492,7 @@
       :mediaList="previewMediaList"
       :initialIndex="previewInitialIndex"
       :is-guest="isGuest"
+      :is-read-only="isReadOnlyUser"
       @close="closeMediaPreview"
       @show-toast="showCustomToast"
       @request-share="openShareDialog"
@@ -671,7 +672,7 @@
 
     <!-- 桌面端浮动粘贴按钮 -->
     <div
-      v-if="clipboard && !isMobile"
+      v-if="clipboard && canWrite && !isMobile"
       class="floating-paste-button desktop"
       :class="{ 'auto-hide': !isNearPasteButton }"
       :style="{ left: pasteButtonPosition.x + 'px', top: pasteButtonPosition.y + 'px' }"
@@ -1163,6 +1164,11 @@ export default {
     // 打开统一的分享对话框（H1/H2）：生成只对该文件有效、带过期时间的
     // 签名链接并显示在文本框里。公开文件直接显示长期有效的链接，不问有效期。
     openShareDialog(key) {
+      if (this.isGuest || this.isReadOnlyUser) {
+        this.showCustomToast(this.isReadOnlyUser ? '只读用户无法分享文件' : '请先登录', 'error');
+        this.showContextMenu = false;
+        return;
+      }
       this.showContextMenu = false;
       const file = this.files.find((f) => f.key === key);
       this.shareDialog = {
@@ -1244,6 +1250,10 @@ export default {
     async openSharesDialog() {
       if (!this.isLoggedIn) {
         this.showLoginModal();
+        return;
+      }
+      if (this.isReadOnlyUser) {
+        this.showCustomToast('只读用户无法管理分享链接', 'error');
         return;
       }
       this.showSharesDialog = true;
@@ -1382,8 +1392,13 @@ export default {
       this.showContextMenu = false;
     },
 
-    // 复制单个文件到剪贴板
+    // 复制单个文件到剪贴板（只读用户/游客禁止：复制后粘贴是写操作）
     copyFile(fileKey) {
+      if (this.isGuest || this.isReadOnlyUser) {
+        this.showCustomToast(this.isReadOnlyUser ? '只读用户无法复制文件' : '请先登录', 'error');
+        this.showContextMenu = false;
+        return;
+      }
       this.clipboard = fileKey;
       this.showCustomToast('文件已复制到剪贴板', 'success');
       // 关闭右键菜单
