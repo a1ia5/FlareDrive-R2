@@ -141,15 +141,10 @@
           @blur="onSearchBlur"
           @keyup.enter="submitSearch"
           aria-label="Search"
-          placeholder="搜索文件"
+          placeholder="🍿 搜索文件"
           class="search-input"
           ref="searchInput"
         />
-        <button class="search-button" @click="submitSearch" :disabled="isSearching" title="搜索">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="#666">
-            <path d="M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.43,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.43C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" />
-          </svg>
-        </button>
       </div>
 
       <!-- 右侧控件容器 -->
@@ -211,7 +206,7 @@
       </div>
 
       <!-- 文件操作工具栏 -->
-      <div v-if="!needLogin && !isMultiSelectMode && filteredFiles.length > 0" class="file-toolbar">
+      <div v-if="!needLogin && !isMultiSelectMode && !isSearching && filteredFiles.length > 0" class="file-toolbar">
         <div class="toolbar-left">
           <button @click="toggleMultiSelectMode" class="toolbar-btn primary">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -275,7 +270,7 @@
       </div>
 
       <!-- 文件列表 -->
-      <ul v-if="!needLogin" class="file-list">
+      <ul v-if="!needLogin && !isSearching" class="file-list">
         <li v-if="cwd !== ''">
           <div tabindex="0" class="file-item" @click="cwd = cwd.replace(/[^\/]+\/$/, '')" @contextmenu.prevent>
             <div class="file-icon">
@@ -847,6 +842,7 @@ export default {
     isSearching: false, // 搜索状态
     searchDepthLimited: false, // 搜索触及 5 层深度上限，更深的文件未包含
     searchTruncated: false, // 搜索时某个目录文件过多，未搜完
+    searchTimeout: null, // 搜索防抖定时器
     listTruncated: false, // 当前目录文件过多，列表未显示完（M6）
     isSearchExpanded: false, // 搜索框是否展开
     showContextMenu: false,
@@ -1058,9 +1054,13 @@ export default {
   },
 
   methods: {
-    // 搜索输入处理：只在清空输入时清除结果，不自动搜索；
-    // 搜索只在点击搜索按钮或按回车时触发（submitSearch）
+    // 搜索输入处理
     onSearchInput() {
+      // 清除之前的定时器
+      if (this.searchTimeout) {
+        clearTimeout(this.searchTimeout);
+      }
+
       // 如果搜索框为空，清空结果并收回搜索框
       if (!this.search.trim()) {
         this.searchResults = [];
@@ -1070,7 +1070,13 @@ export default {
         document.body.style.overflow = '';
         document.body.style.overflowX = '';
         document.documentElement.style.overflowX = '';
+        return;
       }
+
+      // 设置新的定时器，防抖处理
+      this.searchTimeout = setTimeout(() => {
+        this.performGlobalSearch(this.search.trim());
+      }, 300);
     },
 
     // 搜索框获得焦点
@@ -3374,6 +3380,20 @@ export default {
       },
       immediate: true,
     },
+
+    search: {
+      handler(newVal) {
+        // 防抖搜索
+        clearTimeout(this.searchTimeout);
+        this.searchTimeout = setTimeout(() => {
+          if (newVal && newVal.length >= 2) {
+            this.performGlobalSearch(newVal);
+          } else {
+            this.searchResults = [];
+          }
+        }, 500); // 500ms 防抖
+      }
+    }
   },
 
   created() {

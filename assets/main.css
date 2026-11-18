@@ -680,28 +680,6 @@ input[type="search"].search-input {
   transition: all 0.3s ease;
 }
 
-/* 搜索按钮（点击或回车触发搜索，输入时不再自动搜索） */
-.search-button {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background-color: whitesmoke;
-  transition: background-color 0.2s ease;
-}
-
-.search-button:hover:not(:disabled) {
-  background-color: rgb(220, 220, 220);
-}
-
-.search-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 /* 移动端搜索框优化 */
 @media (max-width: 768px) {
   .search-container {
