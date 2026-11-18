@@ -1,9 +1,10 @@
 export async function onRequestGet(context) {
   const { env } = context;
-  
-  // 返回前端需要的环境变量配置
+
+  // 返回前端需要的环境变量配置。未设置 QRCODE_API 时默认使用
+  // goqr.me 的公开接口，否则分享对话框里的二维码画布是空的。
   const config = {
-    QRCODE_API: env.QRCODE_API || ''
+    QRCODE_API: env.QRCODE_API || 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='
   };
   
   return new Response(JSON.stringify(config), {

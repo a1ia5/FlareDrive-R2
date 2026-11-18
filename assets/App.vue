@@ -407,8 +407,8 @@
       </div>
       <ul v-if="typeof focusedItem === 'string'" class="contextmenu-list">
         <li>
-          <button @click="copyLink(`/?p=${encodeURIComponent(focusedItem)}`)">
-            <span>复制链接</span>
+          <button @click="copyDirectoryLink(focusedItem)">
+            <span>复制目录链接</span>
           </button>
         </li>
         <li v-if="canWrite">
@@ -449,8 +449,8 @@
           </button>
         </li>
         <li>
-          <button @click="shareFile(focusedItem.key)">
-            <span>复制链接</span>
+          <button @click="openShareDialog(focusedItem.key)">
+            <span>复制分享链接（设置有效期）</span>
           </button>
         </li>
         <li v-if="canWrite && canRegenerateThumbnail(focusedItem.key)">
@@ -478,6 +478,7 @@
       :initialIndex="previewInitialIndex"
       @close="closeMediaPreview"
       @show-toast="showCustomToast"
+      @request-share="openShareDialog"
     />
 
     <!-- 自定义输入对话框 -->
@@ -533,6 +534,45 @@
           <button @click="cancelConfirm" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px;">{{ confirmDialog.cancelText || '取消' }}</button>
           <button @click="confirmAction" :style="`padding: 8px 16px; background: ${confirmDialog.type === 'danger' ? '#dc3545' : '#007bff'}; color: white; border: none; border-radius: 4px;`">{{ confirmDialog.confirmText || '确定' }}</button>
         </div>
+      </div>
+    </Dialog>
+
+    <!-- 分享对话框（H1/H2/D1）：生成只对单个文件有效的签名链接，显示在文本框里 -->
+    <Dialog v-model="showShareDialog">
+      <div style="padding: 20px; width: 360px; max-width: 90vw;">
+        <h3 style="margin: 0 0 8px 0;">分享文件</h3>
+        <p v-text="shareDialog.name" style="margin: 0 0 15px 0; color: #666; word-break: break-all;"></p>
+        <div v-if="!shareDialog.isPublic" style="margin-bottom: 15px;">
+          <div style="margin-bottom: 8px; color: #333;">有效期：</div>
+          <div style="display: flex; gap: 8px;">
+            <button
+              v-for="d in [1, 7, 30]"
+              :key="d"
+              @click="setShareDays(d)"
+              :style="`flex: 1; padding: 8px; border: 1px solid ${shareDialog.days === d ? '#007bff' : '#ddd'}; background: ${shareDialog.days === d ? '#e3f2fd' : 'white'}; color: ${shareDialog.days === d ? '#007bff' : '#333'}; border-radius: 4px; cursor: pointer;`"
+            >{{ d }} 天</button>
+          </div>
+        </div>
+        <p v-else style="margin: 0 0 15px 0; color: #666;">公开文件，链接长期有效，无需设置有效期。</p>
+        <div v-if="shareDialog.loading" style="text-align: center; color: #666; padding: 10px 0;">正在生成链接…</div>
+        <div v-else-if="shareDialog.url">
+          <input
+            readonly
+            :value="shareDialog.url"
+            @click="$event.target.select()"
+            style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 8px; font-size: 13px;"
+          />
+          <p style="margin: 0 0 12px 0; color: #666; font-size: 13px;">有效期至 {{ shareDialog.expiresText }}</p>
+          <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+            <button @click="copyShareUrl" style="flex: 1; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">复制链接</button>
+            <button @click="showShareDialog = false" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">关闭</button>
+          </div>
+          <div style="text-align: center;">
+            <canvas ref="shareQrCanvas" width="200" height="200" style="border: 1px solid #eee;"></canvas>
+            <p style="margin: 8px 0 0 0; color: #666; font-size: 13px;">扫描二维码分享</p>
+          </div>
+        </div>
+        <p v-if="shareDialog.error" style="color: #dc3545; margin: 10px 0 0 0;" v-text="shareDialog.error"></p>
       </div>
     </Dialog>
 
@@ -767,6 +807,18 @@ export default {
       resolve: null,
       reject: null
     },
+    // 分享对话框相关（H1/H2：统一的分享入口，生成只对单个文件有效的签名链接）
+    showShareDialog: false,
+    shareDialog: {
+      key: '',
+      name: '',
+      days: 7,
+      url: '',
+      expiresText: '',
+      isPublic: false,
+      loading: false,
+      error: ''
+    },
     // 浮动粘贴按钮相关
     pasteButtonPosition: { x: 0, y: 0 },
     isDraggingPasteButton: false,
@@ -987,18 +1039,37 @@ export default {
       return this.thumbToken ? `${base}?token=${this.thumbToken}` : base;
     },
 
-    // 复制文件的分享链接：向服务端申请一个只对该文件有效、带过期时间的签名链接
-    async shareFile(key) {
+    // 打开统一的分享对话框（H1/H2）：生成只对该文件有效、带过期时间的
+    // 签名链接并显示在文本框里。公开文件直接显示长期有效的链接，不问有效期。
+    openShareDialog(key) {
       this.showContextMenu = false;
-      let days;
-      try {
-        const input = await this.showInputPrompt('复制分享链接', '有效天数（1-30）', '7');
-        if (input === null || input === undefined || input === '') return;
-        days = Math.min(30, Math.max(1, parseFloat(input) || 7));
-      } catch (e) {
-        return; // 用户取消
-      }
+      const file = this.files.find((f) => f.key === key);
+      this.shareDialog = {
+        key,
+        name: file ? file.name : key.split('/').pop(),
+        days: 7,
+        url: '',
+        expiresText: '',
+        isPublic: false,
+        loading: false,
+        error: ''
+      };
+      this.showShareDialog = true;
+      this.generateShareLink();
+    },
 
+    setShareDays(days) {
+      if (this.shareDialog.days === days || this.shareDialog.loading) return;
+      this.shareDialog.days = days;
+      this.generateShareLink();
+    },
+
+    // 向服务端申请一个只对该文件有效、带过期时间的签名链接（POST /api/sign）
+    async generateShareLink() {
+      const dialog = this.shareDialog;
+      dialog.loading = true;
+      dialog.error = '';
+      dialog.url = '';
       try {
         const headers = { 'Content-Type': 'application/json' };
         const savedCredentials = localStorage.getItem('authCredentials');
@@ -1007,21 +1078,68 @@ export default {
         const response = await fetch('/api/sign', {
           method: 'POST',
           headers,
-          body: JSON.stringify({ key, expiresIn: Math.round(days * 86400) })
+          body: JSON.stringify({ key: dialog.key, expiresIn: Math.round(dialog.days * 86400) })
         });
-        const data = await response.json();
-        if (!response.ok || !data.url) throw new Error(data.error || '生成链接失败');
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.url) throw new Error(data.error || `生成链接失败（HTTP ${response.status}）`);
 
-        await this.writeClipboard(data.url);
-        if (data.public) {
-          this.showCustomToast('公开文件的链接已复制（长期有效）', 'success');
-        } else {
-          const until = new Date(data.expires * 1000).toLocaleString();
-          this.showCustomToast(`分享链接已复制，有效期至 ${until}`, 'success');
-        }
+        dialog.url = data.url;
+        dialog.isPublic = !!data.public;
+        dialog.expiresText = data.public
+          ? '长期有效'
+          : new Date(data.expires * 1000).toLocaleString('zh-CN');
+        this.$nextTick(() => this.drawShareQR());
       } catch (error) {
-        this.showCustomToast('复制分享链接失败: ' + (error.message || '未知错误'), 'error');
+        dialog.error = error.message || '生成链接失败';
+        this.showCustomToast('生成分享链接失败: ' + dialog.error, 'error');
+      } finally {
+        dialog.loading = false;
       }
+    },
+
+    // 把对话框里显示的链接复制到剪贴板（失败时报错，不报假成功）
+    async copyShareUrl() {
+      try {
+        await this.writeClipboard(this.shareDialog.url);
+        this.showCustomToast('分享链接已复制到剪贴板', 'success');
+      } catch (error) {
+        this.showCustomToast('复制失败：浏览器拒绝写入剪贴板', 'error');
+      }
+    },
+
+    // 把生成的分享链接画成二维码；外部服务不可用时画占位文字，不留空白
+    drawShareQR() {
+      const canvas = this.$refs.shareQrCanvas;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const url = this.shareDialog.url;
+      if (!url) return;
+      const qrcodeApi = window.ENV?.QRCODE_API || '';
+      if (!qrcodeApi) {
+        this.drawQRPlaceholder(ctx, '未配置二维码服务');
+        return;
+      }
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        ctx.clearRect(0, 0, 200, 200);
+        ctx.drawImage(img, 0, 0, 200, 200);
+      };
+      img.onerror = () => this.drawQRPlaceholder(ctx, '二维码生成失败');
+      img.src = `${qrcodeApi}${encodeURIComponent(url)}`;
+    },
+
+    drawQRPlaceholder(ctx, message) {
+      ctx.fillStyle = '#f0f0f0';
+      ctx.fillRect(0, 0, 200, 200);
+      ctx.fillStyle = '#333';
+      ctx.font = '14px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('QR Code', 100, 90);
+      ctx.fillText(message, 100, 110);
+      ctx.font = '12px Arial';
+      ctx.fillStyle = '#666';
+      ctx.fillText('扫码前请先复制上方链接', 100, 130);
     },
 
     async writeClipboard(text) {
@@ -1099,11 +1217,16 @@ export default {
       }
     },
 
-    copyLink(link) {
-      const url = new URL(link, window.location.origin);
-      navigator.clipboard.writeText(url.toString());
-
-      this.showCustomToast('文件链接已复制到剪贴板', 'success');
+    // 复制目录链接（文件夹右键菜单）：应用内地址，接收方需要登录后才能打开。
+    // 和文件分享链接是两回事，标签上要区分开（H2）。
+    async copyDirectoryLink(path) {
+      const url = new URL(`/?p=${encodeURIComponent(path)}`, window.location.origin).toString();
+      try {
+        await this.writeClipboard(url);
+        this.showCustomToast('目录链接已复制到剪贴板', 'success');
+      } catch (error) {
+        this.showCustomToast('复制失败：浏览器拒绝写入剪贴板', 'error');
+      }
       // 关闭右键菜单
       this.showContextMenu = false;
     },

@@ -197,32 +197,6 @@
       </div>
     </div>
 
-    <!-- 分享模态框 -->
-    <div v-if="showShareModal" class="share-modal" @click="showShareModal = false">
-      <div class="share-content" @click.stop>
-        <h3>分享文件</h3>
-        <div v-if="isMobile" class="mobile-share-options">
-          <button class="share-option" @click="shareToWechat">
-            <span>分享到微信好友</span>
-          </button>
-          <button class="share-option" @click="shareToMoments">
-            <span>分享到朋友圈</span>
-          </button>
-          <button class="share-option" @click="copyShareLink">
-            <span>复制链接</span>
-          </button>
-        </div>
-        <div v-else class="desktop-share-options">
-          <div class="qr-code-container">
-            <canvas ref="qrCanvas" width="200" height="200"></canvas>
-            <p>扫描二维码分享</p>
-          </div>
-          <button class="share-option" @click="copyShareLink">
-            <span>复制链接</span>
-          </button>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -243,7 +217,7 @@ export default {
       default: 0
     }
   },
-  emits: ['close'],
+  emits: ['close', 'show-toast', 'request-share'],
   data() {
     return {
       currentIndex: 0,
@@ -274,9 +248,6 @@ export default {
       swipeStartY: 0,
       isSwipeGesture: false,
       
-      // 分享相关
-      showShareModal: false,
-
       // 移动端检测
       isMobile: false,
 
@@ -512,83 +483,10 @@ export default {
       link.click();
     },
     
-    // 分享功能
+    // 分享功能：交给父组件的统一分享对话框（H1：绝不能直接复制当前媒体的
+    // 目录级令牌地址；父组件会申请只对该文件有效的签名链接）
     shareMedia() {
-      this.showShareModal = true;
-      if (!this.isMobile) {
-        this.$nextTick(() => {
-          this.generateQRCode();
-        });
-      }
-    },
-    
-    copyShareLink() {
-      const url = new URL(this.currentMedia.url, window.location.origin);
-      navigator.clipboard.writeText(url.toString()).then(() => {
-        this.$emit('show-toast', '链接已复制到剪贴板', 'success');
-        this.showShareModal = false;
-      });
-    },
-
-    shareToWechat() {
-      // 微信分享逻辑（需要微信SDK）
-      this.$emit('show-toast', '微信分享功能需要在微信环境中使用', 'warning');
-    },
-
-    shareToMoments() {
-      // 朋友圈分享逻辑（需要微信SDK）
-      this.$emit('show-toast', '朋友圈分享功能需要在微信环境中使用', 'warning');
-    },
-    
-    async generateQRCode() {
-      const canvas = this.$refs.qrCanvas;
-      if (!canvas) return;
-
-      const ctx = canvas.getContext('2d');
-      const url = new URL(this.currentMedia.url, window.location.origin).toString();
-
-      // 检查是否配置了外部二维码API
-      const qrcodeApi = window.ENV?.QRCODE_API || '';
-
-      if (qrcodeApi) {
-        try {
-          // 使用外部API生成二维码
-          const qrUrl = `${qrcodeApi}${encodeURIComponent(url)}`;
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-
-          img.onload = () => {
-            ctx.clearRect(0, 0, 200, 200);
-            ctx.drawImage(img, 0, 0, 200, 200);
-          };
-
-          img.onerror = () => {
-            this.drawQRPlaceholder(ctx, '二维码生成失败');
-          };
-
-          img.src = qrUrl;
-        } catch (error) {
-          console.error('二维码生成错误:', error);
-          this.drawQRPlaceholder(ctx, '二维码生成失败');
-        }
-      } else {
-        // 没有配置API，显示提示信息
-        this.drawQRPlaceholder(ctx, '需要配置QRCODE_API');
-      }
-    },
-
-    drawQRPlaceholder(ctx, message) {
-      ctx.fillStyle = '#f0f0f0';
-      ctx.fillRect(0, 0, 200, 200);
-      ctx.fillStyle = '#333';
-      ctx.font = '14px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText('QR Code', 100, 90);
-      ctx.fillText(message, 100, 110);
-      ctx.font = '12px Arial';
-      ctx.fillStyle = '#666';
-      ctx.fillText('请配置环境变量', 100, 130);
-      ctx.fillText('QRCODE_API', 100, 145);
+      this.$emit('request-share', this.currentMedia.key);
     },
     
     detectMobile() {
@@ -1120,70 +1018,6 @@ export default {
 
 
 
-/* 分享模态框 */
-.share-modal {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.8);
-  z-index: 10002;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.share-content {
-  background: white;
-  border-radius: 12px;
-  padding: 30px;
-  max-width: 400px;
-  width: 90%;
-  text-align: center;
-}
-
-.share-content h3 {
-  margin: 0 0 20px 0;
-  color: #333;
-}
-
-.mobile-share-options,
-.desktop-share-options {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.share-option {
-  background: #4CAF50;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  padding: 12px 20px;
-  cursor: pointer;
-  transition: background 0.3s ease;
-}
-
-.share-option:hover {
-  background: #45a049;
-}
-
-.qr-code-container {
-  margin-bottom: 20px;
-}
-
-.qr-code-container canvas {
-  border: 1px solid #ddd;
-  border-radius: 8px;
-}
-
-.qr-code-container p {
-  margin: 10px 0 0 0;
-  color: #666;
-  font-size: 14px;
-}
-
 /* 移动端优化 */
 @media (max-width: 768px) {
   .media-preview-container {
@@ -1231,11 +1065,6 @@ export default {
   .zoom-level {
     font-size: 12px;
     min-width: 40px;
-  }
-
-  .share-content {
-    padding: 20px;
-    margin: 20px;
   }
 
   /* 隐藏桌面端顶部控制栏 */
