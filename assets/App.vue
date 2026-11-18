@@ -403,7 +403,7 @@
       <div v-if="isSearching" style="margin: 20px 0; text-align: center">
         <span style="font-size: 20px;">搜索中...</span>
       </div>
-      <div v-else-if="!needLogin && !filteredFiles.length && !filteredFolders.length" style="margin: 20px 0; text-align: center">
+      <div v-else-if="!loading && !needLogin && !filteredFiles.length && !filteredFolders.length" style="margin: 20px 0; text-align: center">
         <span style="font-size: 20px;">没有文件</span>
       </div>
       <div v-if="listTruncated && !search" style="margin: 10px 0; text-align: center; color: #b26a00;">
