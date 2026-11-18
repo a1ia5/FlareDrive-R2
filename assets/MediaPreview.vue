@@ -56,7 +56,7 @@
           class="preview-audio"
           controls
           autoplay
-          @loadeddata="onAudioLoad"
+          @loadedmetadata="onAudioLoad"
           @error="onAudioError"
         >
           您的浏览器不支持音频播放
@@ -573,10 +573,13 @@ export default {
       }
     },
 
-    // 检查图片加载状态（只对图片用 Image 探针；视频/音频由各自
-    // 元素的 loadeddata 事件清掉 loading，避免探针误报错误）
+    // 用 Image 探针对所有媒体类型做加载检查：图片靠探针的 onload；
+    // 视频/音频靠探针的快速 onerror —— 模板里媒体元素是 v-else-if，
+    // 只有 loading 清掉后才会挂载，所以它们的 loadeddata 事件永远等
+    // 不到；探针置的瞬时 error 标志不会显示出来（媒体分支在 v-else-if
+    // 链里优先于 error 分支），随后媒体元素自己的 load 事件会把它复位。
+    // 不要再把探针限制为只对图片生效，否则视频/音频永远卡在加载中。
     checkImageLoad() {
-      if (!this.isImage) return;
       if (!this.currentMedia.url) {
         return;
       }
