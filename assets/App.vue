@@ -5,7 +5,13 @@
       @drop.prevent="onDrop"
       :style="{ backgroundImage: `url('${backgroundImageUrl}')` }"
   >
-    <progress v-if="uploadProgress !== null" :value="uploadProgress" max="100"></progress>
+    <div v-if="uploadProgress !== null" style="position: fixed; top: 0; left: 0; right: 0; z-index: 9999; background: rgba(255,255,255,0.95); padding: 6px 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <progress :value="uploadProgress" max="100" style="flex: 1;"></progress>
+        <span v-if="uploadFileName" v-text="uploadFileName" style="font-size: 13px; color: #555; max-width: 40%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></span>
+        <span v-text="Math.round(uploadProgress) + '%'" style="font-size: 13px; color: #555;"></span>
+      </div>
+    </div>
     <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder" @fetchUrl="fetchFromUrl"></UploadPopup>
 
 
@@ -702,6 +708,7 @@ import {
   generateThumbnailFromUrl,
   blobDigest,
   multipartUpload,
+  apiPath,
   SIZE_LIMIT,
 } from "/assets/main.mjs";
 import Dialog from "./Dialog.vue";
@@ -752,6 +759,7 @@ export default {
     showMenu: false,
     showUploadPopup: false,
     uploadProgress: null,
+    uploadFileName: '', // 进度条当前对应的文件名（上传队列按文件显示，避免百分比乱跳）
     uploadQueue: [],
     backgroundImageUrl: "/assets/bg-cat.webp",
     needLogin: false,
@@ -1240,7 +1248,7 @@ export default {
     },
 
     async copyPaste(source, target) {
-      const uploadUrl = `/api/write/items/${target}`;
+      const uploadUrl = `/api/write/items/${apiPath(target)}`;
 
       // 准备请求头
       const headers = {
@@ -1278,7 +1286,7 @@ export default {
             throw authError;
           }
           // 其他HTTP错误
-          const httpError = new Error(`HTTP ${response.status}: ${response.statusText}`);
+          const httpError = new Error(`请求失败：HTTP ${response.status} ${response.statusText}`);
           console.log('❌ copyPaste HTTP错误:', httpError);
           throw httpError;
         }
@@ -1309,7 +1317,7 @@ export default {
 
     // 删除文件的统一方法
     async deleteFile(key) {
-      const deleteUrl = `/api/write/items/${key}`;
+      const deleteUrl = `/api/write/items/${apiPath(key)}`;
 
       // 准备请求头
       const headers = {};
@@ -1334,7 +1342,7 @@ export default {
             throw authError;
           }
           // 其他HTTP错误
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          throw new Error(`请求失败：HTTP ${response.status} ${response.statusText}`);
         }
       } catch (error) {
         // 如果已经是我们的权限错误，直接抛出
@@ -1351,17 +1359,12 @@ export default {
         const folderName = await this.showInputPrompt("创建文件夹", "请输入文件夹名称");
         if (!folderName) return;
         this.showUploadPopup = false;
-        const uploadUrl = `/api/write/items/${this.cwd}${folderName}/_$folder$`;
+        const uploadUrl = `/api/write/items/${apiPath(this.cwd + folderName + '/_$folder$')}`;
         await axios.put(uploadUrl, "");
         this.fetchFiles();
       } catch (error) {
         if (error === null) return; // 用户取消
-        fetch("/api/write/")
-          .then((value) => {
-            if (value.redirected) window.location.href = value.url;
-          })
-          .catch(() => { });
-        console.log(`Create folder failed`);
+        this.showCustomToast('创建文件夹失败: ' + (error.message || '未知错误'), 'error');
       }
     },
 
@@ -1378,7 +1381,7 @@ export default {
         headers['Authorization'] = `Basic ${savedCredentials}`;
       }
 
-      return fetch(`/api/children/${this.cwd}`, { headers })
+      return fetch(`/api/children/${apiPath(this.cwd)}`, { headers })
         .then((res) => res.json())
         .then((data) => {
           if (data.needLogin) {
@@ -2378,29 +2381,29 @@ export default {
       if (!this.uploadQueue.length) {
         this.fetchFiles();
         this.uploadProgress = null;
+        this.uploadFileName = '';
         return;
       }
 
       /** @type File **/
       const { basedir, file } = this.uploadQueue.pop(0);
       let thumbnailDigest = null;
+      // 进度条按当前文件显示（M8）：每换一个文件重置百分比并显示文件名
+      this.uploadFileName = file.name;
+      this.uploadProgress = 0;
 
       if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
         try {
           const thumbnailBlob = await generateThumbnail(file);
           const digestHex = await blobDigest(thumbnailBlob);
 
-          const thumbnailUploadUrl = `/api/write/items/_$flaredrive$/thumbnails/${digestHex}.png`;
+          const thumbnailUploadUrl = `/api/write/items/${apiPath('_$flaredrive$/thumbnails/' + digestHex + '.png')}`;
           try {
             await axios.put(thumbnailUploadUrl, thumbnailBlob);
             thumbnailDigest = digestHex;
           } catch (error) {
-            fetch("/api/write/")
-              .then((value) => {
-                if (value.redirected) window.location.href = value.url;
-              })
-              .catch(() => { });
-            console.log(`Upload ${digestHex}.png failed`);
+            // 缩略图失败不阻断主文件上传，只记日志
+            console.log(`Upload ${digestHex}.png failed`, error);
           }
         } catch (error) {
           console.log(`Generate thumbnail failed`);
@@ -2408,7 +2411,7 @@ export default {
       }
 
       try {
-        const uploadUrl = `/api/write/items/${basedir}${file.name}`;
+        const uploadUrl = `/api/write/items/${apiPath(basedir + file.name)}`;
         const headers = {};
         const onUploadProgress = (progressEvent) => {
           var percentCompleted =
@@ -2425,11 +2428,9 @@ export default {
           await axios.put(uploadUrl, file, { headers, onUploadProgress });
         }
       } catch (error) {
-        fetch("/api/write/")
-          .then((value) => {
-            if (value.redirected) window.location.href = value.url;
-          })
-          .catch(() => { });
+        // M8：上传失败要明确告诉用户是哪个文件、为什么失败（以前只写 console）
+        const reason = error.response?.data?.error || error.message || '未知错误';
+        this.showCustomToast(`上传失败："${file.name}"（${reason}）`, 'error');
         console.log(`Upload ${file.name} failed`, error);
       }
       setTimeout(this.processUploadQueue);
@@ -2501,6 +2502,7 @@ export default {
         const total = allItems.length;
         let done = 0;
         if (total > 0) this.uploadProgress = 0;
+        if (total > 0) this.uploadFileName = `正在删除文件夹 "${folderName}"…`;
 
         for (const item of allItems) {
           try {
@@ -2520,10 +2522,12 @@ export default {
         await this.deleteFile(folderMarkerKey);
 
         this.uploadProgress = null;
+        this.uploadFileName = '';
         this.fetchFiles();
         this.showCustomToast(`文件夹 "${folderName}" 已删除`, 'success');
       } catch (error) {
         this.uploadProgress = null;
+        this.uploadFileName = '';
         if (error === false) return; // 用户取消
 
         if (error.isAuthError) {
@@ -2574,7 +2578,7 @@ export default {
         // 下一步用网络地址加载视频时，浏览器会读到旧的/缺失的 content-type，
         // 根本不知道这是个视频，直接加载失败。这一步只更新元数据，
         // 不需要重新上传文件本体，很快。
-        await axios.post(`/api/write/items/${key}?fixMetadata`, { contentType: guessedType });
+        await axios.post(`/api/write/items/${apiPath(key)}?fixMetadata`, { contentType: guessedType });
 
         this.centerProgress.text = guessedType.startsWith('video/')
           ? '正在读取视频帧（大文件可能需要几秒）...'
@@ -2591,8 +2595,8 @@ export default {
         this.centerProgress.text = '正在保存缩略图...';
 
         const digestHex = await blobDigest(thumbnailBlob);
-        await axios.put(`/api/write/items/_$flaredrive$/thumbnails/${digestHex}.png`, thumbnailBlob);
-        await axios.post(`/api/write/items/${key}?fixMetadata`, { thumbnail: digestHex });
+        await axios.put(`/api/write/items/${apiPath('_$flaredrive$/thumbnails/' + digestHex + '.png')}`, thumbnailBlob);
+        await axios.post(`/api/write/items/${apiPath(key)}?fixMetadata`, { thumbnail: digestHex });
 
         await this.fetchFiles();
         this.showCustomToast(`"${fileName}" 的缩略图已重新生成`, 'success');
@@ -2729,6 +2733,8 @@ export default {
           // 显示进度提示
           const totalItems = allItems.length;
           let processedItems = 0;
+          this.uploadFileName = '正在移动文件夹…';
+          if (totalItems > 0) this.uploadProgress = 0;
 
           // 移动所有项目
           for (const item of allItems) {
@@ -2772,6 +2778,7 @@ export default {
 
           // 清除进度
           this.uploadProgress = null;
+          this.uploadFileName = '';
         } else {
           // 单文件移动逻辑，修复根目录的情况
           const targetFilePath = normalizedPath + finalFileName;
@@ -2815,6 +2822,9 @@ export default {
         const displayFileName = finalFileName; // 使用之前已经处理过的文件名
         this.showCustomToast(`文件 "${displayFileName}" 已成功移动到 ${targetDisplayName}`, 'success');
       } catch (error) {
+        // 失败时也要清除进度条，否则会一直停在屏幕顶部
+        this.uploadProgress = null;
+        this.uploadFileName = '';
         console.log('❌ 移动文件过程中捕获到错误:', error);
         console.log('- 错误类型:', typeof error);
         console.log('- 错误值:', error);
@@ -2978,7 +2988,7 @@ export default {
       let marker = null;
 
       do {
-        const url = new URL(`/api/children/${prefix}`, window.location.origin);
+        const url = new URL(`/api/children/${apiPath(prefix)}`, window.location.origin);
         if (marker) {
           url.searchParams.set('marker', marker);
         }
@@ -3061,7 +3071,7 @@ export default {
           headers['Authorization'] = `Basic ${savedCredentials}`;
         }
 
-        const response = await fetch(`/api/children/${directory}`, { headers });
+        const response = await fetch(`/api/children/${apiPath(directory)}`, { headers });
         const data = await response.json();
         this.registerRawToken(data);
 

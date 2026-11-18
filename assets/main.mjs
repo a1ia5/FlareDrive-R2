@@ -204,6 +204,13 @@ export async function blobDigest(blob) {
 
 export const SIZE_LIMIT = 100 * 1000 * 1000; // 100MB
 
+// 把 R2 key 逐段 URL 编码后拼成 API 路径（M7）：文件名里的 # ? % 等字符
+// 不编码会被浏览器当成 URL 结构解析（# 变锚点、? 变查询串、% 触发解码错误），
+// 服务端收到的就是错误的 key。读路径（rawUrl）本来就逐段编码，写路径也要一样。
+export function apiPath(key) {
+  return key.split("/").map(encodeURIComponent).join("/");
+}
+
 /**
  * @param {string} key
  * @param {File} file
@@ -214,7 +221,7 @@ export async function multipartUpload(key, file, options) {
   headers["content-type"] = file.type;
 
   const uploadId = await axios
-    .post(`/api/write/items/${key}?uploads`, "", { headers })
+    .post(`/api/write/items/${apiPath(key)}?uploads`, "", { headers })
     .then((res) => res.data.uploadId);
   const totalChunks = Math.ceil(file.size / SIZE_LIMIT);
 
@@ -223,7 +230,7 @@ export async function multipartUpload(key, file, options) {
       const chunk = file.slice((i - 1) * SIZE_LIMIT, i * SIZE_LIMIT);
       const searchParams = new URLSearchParams({ partNumber: i, uploadId });
       yield axios
-        .put(`/api/write/items/${key}?${searchParams}`, chunk, {
+        .put(`/api/write/items/${apiPath(key)}?${searchParams}`, chunk, {
           onUploadProgress(progressEvent) {
             if (typeof options?.onUploadProgress !== "function") return;
             options.onUploadProgress({
@@ -245,7 +252,7 @@ export async function multipartUpload(key, file, options) {
     uploadedParts[partNumber - 1] = { partNumber, etag };
   }
   const completeParams = new URLSearchParams({ uploadId });
-  await axios.post(`/api/write/items/${key}?${completeParams}`, {
+  await axios.post(`/api/write/items/${apiPath(key)}?${completeParams}`, {
     parts: uploadedParts,
   });
 }
