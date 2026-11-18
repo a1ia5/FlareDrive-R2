@@ -422,11 +422,6 @@
             <span>复制目录链接</span>
           </button>
         </li>
-        <li>
-          <button @click="downloadFolderAsZip(focusedItem)">
-            <span>下载为 ZIP</span>
-          </button>
-        </li>
         <li v-if="canWrite">
           <button @click="moveFile(focusedItem + '_$folder$')">
             <span>移动</span>
@@ -1276,20 +1271,6 @@ export default {
       } catch (error) {
         this.showCustomToast('撤销失败: ' + (error.message || '未知错误'), 'error');
       }
-    },
-
-    // D2：把文件夹打包成 ZIP 下载。复用目录级签名令牌（和 /raw/ 一样），
-    // 直接打开新窗口流式下载，不经过浏览器内存。
-    downloadFolderAsZip(dir) {
-      this.showContextMenu = false;
-      const prefix = dir.endsWith('/') ? dir : dir + '/';
-      let best = null;
-      for (const t of this.rawTokens) {
-        if (prefix.startsWith(t.prefix) && (!best || t.prefix.length > best.prefix.length)) best = t;
-      }
-      const url = new URL(`/api/zip?dir=${apiPath(prefix)}`, window.location.origin);
-      if (best) url.searchParams.set('token', best.token);
-      window.open(url.toString(), '_blank');
     },
 
     async writeClipboard(text) {
