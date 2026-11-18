@@ -496,6 +496,7 @@
       :show="showMediaPreview"
       :mediaList="previewMediaList"
       :initialIndex="previewInitialIndex"
+      :is-guest="isGuest"
       @close="closeMediaPreview"
       @show-toast="showCustomToast"
       @request-share="openShareDialog"
