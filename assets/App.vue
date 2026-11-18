@@ -647,6 +647,32 @@
       </div>
     </Dialog>
 
+    <!-- 离线下载对话框（D3）：URL 表单 + 目标目录 + 大小上限，下载中显示已用时 -->
+    <Dialog v-model="showFetchDialog">
+      <div style="padding: 20px; width: 420px; max-width: 90vw;">
+        <h3 style="margin: 0 0 15px 0;">离线下载</h3>
+        <div style="margin-bottom: 15px;">
+          <div style="margin-bottom: 8px; color: #333;">下载链接：</div>
+          <input
+            type="url"
+            v-model="fetchDialog.url"
+            :disabled="fetchDialog.loading"
+            @keyup.enter="submitFetchDialog"
+            placeholder="https://example.com/file.zip"
+            style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;"
+          />
+        </div>
+        <p style="margin: 0 0 8px 0; color: #666; font-size: 13px;">保存到：<span v-text="fetchDialog.target" style="word-break: break-all;"></span></p>
+        <p style="margin: 0 0 15px 0; color: #666; font-size: 13px;">单个文件上限 256 MiB；目标服务器不返回文件大小时上限 64 MB。同名文件不会被覆盖，会保存为「名称 (1).扩展名」。</p>
+        <div v-if="fetchDialog.loading" style="text-align: center; color: #666; padding: 10px 0;">服务器正在下载…已用时 {{ fetchDialog.elapsed }} 秒，请稍候</div>
+        <p v-if="fetchDialog.error" style="color: #dc3545; margin: 10px 0 0 0;" v-text="fetchDialog.error"></p>
+        <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 15px;">
+          <button @click="showFetchDialog = false" :disabled="fetchDialog.loading" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">取消</button>
+          <button @click="submitFetchDialog" :disabled="fetchDialog.loading || !fetchDialog.url.trim()" style="padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">开始下载</button>
+        </div>
+      </div>
+    </Dialog>
+
     <!-- 桌面端浮动粘贴按钮 -->
     <div
       v-if="clipboard && !isMobile"
@@ -903,6 +929,10 @@ export default {
     sharesList: [],
     sharesLoading: false,
     sharesError: '',
+    // 离线下载对话框相关（D3）
+    showFetchDialog: false,
+    fetchDialog: { url: '', target: '/', loading: false, error: '', elapsed: 0 },
+    fetchTimer: null,
     // 浮动粘贴按钮相关
     pasteButtonPosition: { x: 0, y: 0 },
     isDraggingPasteButton: false,
@@ -1319,28 +1349,28 @@ export default {
       }
     },
 
-    // 离线下载：让服务端抓取一个 URL 保存到当前目录
-    async fetchFromUrl() {
+    // 离线下载：打开表单对话框（D3），真正下载在 submitFetchDialog 里
+    fetchFromUrl() {
       this.showUploadPopup = false;
       if (!this.canWrite) {
         this.showPermissionDialog('离线下载');
         return;
       }
+      this.fetchDialog = { url: '', target: this.cwd || '/', loading: false, error: '', elapsed: 0 };
+      this.showFetchDialog = true;
+    },
 
-      let url;
-      try {
-        url = await this.showInputPrompt('离线下载', '请输入文件的下载链接（http/https）');
-      } catch (e) {
-        return; // 用户取消
-      }
-      url = (url || '').trim();
+    async submitFetchDialog() {
+      const url = (this.fetchDialog.url || '').trim();
       if (!url) return;
       if (!/^https?:\/\//i.test(url)) {
-        this.showCustomToast('只支持 http/https 链接', 'warning');
+        this.fetchDialog.error = '只支持 http/https 链接';
         return;
       }
-
-      this.centerProgress = { visible: true, text: '服务器正在下载文件，请不要关闭页面...', fileName: url };
+      this.fetchDialog.error = '';
+      this.fetchDialog.loading = true;
+      this.fetchDialog.elapsed = 0;
+      this.fetchTimer = setInterval(() => { this.fetchDialog.elapsed += 1; }, 1000);
       let saved = null;
       try {
         const headers = { 'Content-Type': 'application/json' };
@@ -1355,6 +1385,7 @@ export default {
         const data = await response.json().catch(() => ({}));
         if (!response.ok || !data.key) {
           if (response.status === 401 || response.status === 403) {
+            this.showFetchDialog = false;
             this.showPermissionDialog('离线下载');
             return;
           }
@@ -1362,12 +1393,15 @@ export default {
         }
         saved = data;
       } catch (error) {
-        this.showCustomToast('离线下载失败: ' + (error.message || '未知错误'), 'error');
+        this.fetchDialog.error = '离线下载失败: ' + (error.message || '未知错误');
         return;
       } finally {
-        this.centerProgress = { visible: false, text: '', fileName: '' };
+        clearInterval(this.fetchTimer);
+        this.fetchTimer = null;
+        this.fetchDialog.loading = false;
       }
 
+      this.showFetchDialog = false;
       const name = saved.key.split('/').pop();
       this.showCustomToast(`已保存 "${name}"（${this.formatSize(saved.size)}）`, 'success');
       await this.fetchFiles();
@@ -2170,6 +2204,10 @@ export default {
         }
         if (this.showSharesDialog) {
           this.showSharesDialog = false;
+          return;
+        }
+        if (this.showFetchDialog && !this.fetchDialog.loading) {
+          this.showFetchDialog = false;
           return;
         }
         if (this.isMultiSelectMode) {
