@@ -12,6 +12,16 @@ function unauthorizedResponse() {
   });
 }
 
+// L10：路径解码失败（BadPathError，status 400）转成 400 响应；其他错误原样抛出
+async function withBadPath(fn: () => Promise<Response>): Promise<Response> {
+  try {
+    return await fn();
+  } catch (e: any) {
+    if (e?.status === 400) return new Response("路径无效", { status: 400 });
+    throw e;
+  }
+}
+
 export async function onRequestPostCreateMultipart(context) {
   const [bucket, path] = parseBucketPath(context);
   if (!bucket) return notFound();
@@ -106,15 +116,15 @@ export async function onRequestPost(context) {
   const searchParams = new URLSearchParams(url.search);
 
   if (searchParams.has("uploads")) {
-    return onRequestPostCreateMultipart(context);
+    return withBadPath(() => onRequestPostCreateMultipart(context));
   }
 
   if (searchParams.has("uploadId")) {
-    return onRequestPostCompleteMultipart(context);
+    return withBadPath(() => onRequestPostCompleteMultipart(context));
   }
 
   if (searchParams.has("fixMetadata")) {
-    return onRequestPostFixMetadata(context);
+    return withBadPath(() => onRequestPostFixMetadata(context));
   }
 
   return new Response("Method not allowed", { status: 405 });
@@ -154,10 +164,17 @@ export async function onRequestPut(context) {
   const url = new URL(context.request.url);
 
   if (new URLSearchParams(url.search).has("uploadId")) {
-    return onRequestPutMultipart(context);
+    return withBadPath(() => onRequestPutMultipart(context));
   }
 
-  const [bucket, path] = parseBucketPath(context);
+  let bucket, path: string;
+  try {
+    [bucket, path] = parseBucketPath(context);
+  } catch (e: any) {
+    // L10：路径解码失败返回 400，而不是 500
+    if (e?.status === 400) return new Response("路径无效", { status: 400 });
+    throw e;
+  }
   if (!bucket) return notFound();
 
   const request: Request = context.request;
@@ -233,7 +250,14 @@ export async function onRequestDelete(context) {
   if(!(await get_auth_status(context))){
     return unauthorizedResponse();
    }
-  const [bucket, path] = parseBucketPath(context);
+  let bucket, path: string;
+  try {
+    [bucket, path] = parseBucketPath(context);
+  } catch (e: any) {
+    // L10：路径解码失败返回 400，而不是 500
+    if (e?.status === 400) return new Response("路径无效", { status: 400 });
+    throw e;
+  }
   if (!bucket) return notFound();
 
   await bucket.delete(path);

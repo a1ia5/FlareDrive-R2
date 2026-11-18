@@ -12,7 +12,7 @@
         <span v-text="Math.round(uploadProgress) + '%'" style="font-size: 13px; color: #555;"></span>
       </div>
     </div>
-    <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder" @fetchUrl="fetchFromUrl"></UploadPopup>
+    <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder" @createTextFile="createTextFile" @fetchUrl="fetchFromUrl"></UploadPopup>
 
 
 
@@ -121,12 +121,9 @@
     </div>
 
     <!-- 上传按钮 - 只有登录用户或有上传权限的游客才显示 -->
-    <button v-if="canUpload" class="upload-button circle" @click="showUploadPopup = true">
-      <svg t="1741764069699" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg"
-        p-id="24280" width="24" height="24">
-        <path
-          d="M576 557.7088V934.4H448V560.4416l-43.8912 43.8848L313.6 513.8176l199.1232-199.1168 0.64 0.64 0.64-0.64 199.1232 199.1168-90.5088 90.5088L576 557.7088zM704 678.4h32c88.3648 0 160-71.6352 160-160s-71.6352-160-160-160c-20.5184 0-40.128 3.8592-58.1568 10.8992C670.336 270.1248 587.4944 192 486.4 192c-106.0416 0-192 85.9584-192 192 0 15.9104 1.9328 31.3728 5.5872 46.1568A127.7504 127.7504 0 0 0 256 422.4c-70.6944 0-128 57.3056-128 128s57.3056 128 128 128h64v128H256c-141.3824 0-256-114.6176-256-256 0-113.3184 73.632-209.4464 175.6608-243.136C210.0352 167.584 336.1216 64 486.4 64c121.312 0 227.552 67.712 281.7728 168.1792C912.0896 248.1792 1024 370.2208 1024 518.4c0 159.0592-128.9408 288-288 288h-32v-128z"
-          fill="#e6e6e6" p-id="24281"></path>
+    <button v-if="canUpload" class="upload-button circle" @click="showUploadPopup = true" title="上传或新建">
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="#e6e6e6">
+        <path d="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" />
       </svg>
     </button>
     <div class="app-bar">
@@ -143,7 +140,7 @@
           @focus="onSearchFocus"
           @blur="onSearchBlur"
           aria-label="Search"
-          placeholder="🍿 输入以全局搜索文件"
+          placeholder="🍿 输入以搜索全部可访问文件（最多 5 层）"
           class="search-input"
           ref="searchInput"
         />
@@ -379,7 +376,7 @@
               <div class="file-attr">
                 <!-- 搜索结果显示完整路径 -->
                 <span v-if="search && searchResults.length > 0" class="file-path" v-text="file.displayPath || file.key"></span>
-                <span v-if="file.uploaded" v-text="new Date(file.uploaded).toLocaleString()"></span>
+                <span v-if="file.uploaded" v-text="new Date(file.uploaded).toLocaleString('zh-CN')"></span>
                 <span v-if="file.size" v-text="formatSize(file.size)"></span>
               </div>
             </div>
@@ -403,6 +400,13 @@
       </div>
       <div v-else-if="!needLogin && !filteredFiles.length && !filteredFolders.length" style="margin: 20px 0; text-align: center">
         <span style="font-size: 20px;">没有文件</span>
+      </div>
+      <div v-if="listTruncated && !search" style="margin: 10px 0; text-align: center; color: #b26a00;">
+        <span>本目录文件过多，仅显示前 20 万个，请分目录查看。</span>
+      </div>
+      <div v-if="search && (searchDepthLimited || searchTruncated)" style="margin: 10px 0; text-align: center; color: #b26a00;">
+        <span v-if="searchDepthLimited">搜索只覆盖 5 层以内的目录，更深的文件未包含。</span>
+        <span v-if="searchTruncated">部分目录文件过多，搜索结果不完整。</span>
       </div>
     </div>
     <Dialog v-model="showContextMenu">
@@ -753,7 +757,10 @@ export default {
     search: "",
     searchResults: [], // 全局搜索结果
     isSearching: false, // 搜索状态
+    searchDepthLimited: false, // 搜索触及 5 层深度上限，更深的文件未包含
+    searchTruncated: false, // 搜索时某个目录文件过多，未搜完
     searchTimeout: null, // 搜索防抖定时器
+    listTruncated: false, // 当前目录文件过多，列表未显示完（M6）
     isSearchExpanded: false, // 搜索框是否展开
     showContextMenu: false,
     showMenu: false,
@@ -1143,7 +1150,7 @@ export default {
       ctx.fillStyle = '#333';
       ctx.font = '14px Arial';
       ctx.textAlign = 'center';
-      ctx.fillText('QR Code', 100, 90);
+      ctx.fillText('二维码', 100, 90);
       ctx.fillText(message, 100, 110);
       ctx.font = '12px Arial';
       ctx.fillStyle = '#666';
@@ -1368,11 +1375,41 @@ export default {
       }
     },
 
-    fetchFiles() {
+    // 新建一个空文本文档（D4）。同名时自动加序号，避免覆盖已有文件。
+    async createTextFile() {
+      if (!this.canWrite) {
+        this.showPermissionDialog('新建文本文档');
+        return;
+      }
+      this.showUploadPopup = false;
+      const existing = new Set(this.files.map((f) => f.key));
+      let name = '新建文本文档.txt';
+      for (let n = 1; existing.has(this.cwd + name); n++) {
+        name = `新建文本文档 (${n}).txt`;
+      }
+      try {
+        await axios.put(`/api/write/items/${apiPath(this.cwd + name)}`, "", {
+          headers: { "Content-Type": "text/plain" },
+        });
+        this.fetchFiles();
+        this.showCustomToast(`已创建 "${name}"`, 'success');
+      } catch (error) {
+        if (error.isAuthError || error?.response?.status === 401 || error?.response?.status === 403) {
+          this.showPermissionDialog('新建文本文档');
+          return;
+        }
+        this.showCustomToast('新建文本文档失败: ' + (error.message || '未知错误'), 'error');
+      }
+    },
+
+    // M6：按 marker 循环拉完所有页（每页最多 2 万个对象）；超过 10 页
+    // （20 万个对象）时停止并提示截断，不再静默显示不完整列表。
+    async fetchFiles() {
       this.files = [];
       this.folders = [];
       this.loading = true;
       this.needLogin = false;
+      this.listTruncated = false;
 
       // 准备请求头
       const headers = {};
@@ -1381,9 +1418,15 @@ export default {
         headers['Authorization'] = `Basic ${savedCredentials}`;
       }
 
-      return fetch(`/api/children/${apiPath(this.cwd)}`, { headers })
-        .then((res) => res.json())
-        .then((data) => {
+      try {
+        let marker = null;
+        const allFiles = [];
+        const folderSet = new Set();
+        for (let page = 0; page < 10; page++) {
+          const url = new URL(`/api/children/${apiPath(this.cwd)}`, window.location.origin);
+          if (marker) url.searchParams.set('marker', marker);
+          const res = await fetch(url, { headers });
+          const data = await res.json();
           if (data.needLogin) {
             // 需要登录 - 静默处理，不弹出登录框
             this.needLogin = true;
@@ -1392,27 +1435,31 @@ export default {
             this.loading = false;
             return;
           }
-
           this.needLogin = false;
           this.registerRawToken(data);
-          this.files = data.value || [];
-          this.folders = data.folders || [];
+          allFiles.push(...(data.value || []));
+          for (const f of (data.folders || [])) folderSet.add(f);
           this.isGuest = data.isGuest || false;
           this.isLoggedIn = !this.isGuest;
+          if (!data.marker) { marker = null; break; }
+          marker = data.marker;
+        }
+        if (marker) this.listTruncated = true;
+        this.files = allFiles;
+        this.folders = [...folderSet];
 
-          if (this.order) {
-            this.files.sort((a, b) => {
-              if (this.order === "size") {
-                return b.size - a.size;
-              }
-            });
-          }
-          this.loading = false;
-        })
-        .catch((error) => {
-          console.error('获取文件列表失败:', error);
-          this.loading = false;
-        });
+        if (this.order) {
+          this.files.sort((a, b) => {
+            if (this.order === "size") {
+              return b.size - a.size;
+            }
+          });
+        }
+        this.loading = false;
+      } catch (error) {
+        console.error('获取文件列表失败:', error);
+        this.loading = false;
+      }
     },
 
     formatSize(size) {
@@ -1958,11 +2005,25 @@ export default {
         return;
       }
 
-      // Escape：退出多选模式
-      if (event.key === 'Escape' && this.isMultiSelectMode) {
-        this.isMultiSelectMode = false;
-        this.selectedFiles = [];
-        return;
+      // Escape：先关闭打开的菜单/右键菜单/上传弹窗，再退出多选模式（D4）
+      if (event.key === 'Escape') {
+        if (this.showMenu) {
+          this.showMenu = false;
+          return;
+        }
+        if (this.showContextMenu) {
+          this.showContextMenu = false;
+          return;
+        }
+        if (this.showUploadPopup) {
+          this.showUploadPopup = false;
+          return;
+        }
+        if (this.isMultiSelectMode) {
+          this.isMultiSelectMode = false;
+          this.selectedFiles = [];
+          return;
+        }
       }
 
       // Delete：删除选中的文件
@@ -2550,9 +2611,11 @@ export default {
     },
 
     // 为已存在的文件重新生成缩略图，不需要重新上传整个文件。
-    // 流程：先修复 content-type（如果缺失）→ 直接用支持 Range 分段请求的网络地址
-    // 生成缩略图（不需要先把整份文件下载到内存里，大文件明显更快）→
-    // 上传缩略图小文件 → 把新缩略图摘要写回原文件。
+    // 流程：只有存的 content-type 不对时才先修复（否则视频元素可能因类型错误
+    // 加载失败）→ 直接用支持 Range 分段请求的网络地址生成缩略图（不需要先把
+    // 整份文件下载到内存里，大文件明显更快）→ 上传缩略图小文件 →
+    // 最后一次 fixMetadata 同时写回 contentType 和 thumbnail（M9：端点本来就
+    // 支持两个字段，类型已正确时全程只有一次整文件重写）。
     // 顺带修复很多旧文件缺失的 content-type（这是"部分视频缩略图显示不出来"
     // 更根本的原因：旧版普通 PUT 上传从未存储过 content-type）。
     async regenerateThumbnail(file) {
@@ -2574,11 +2637,14 @@ export default {
       this.centerProgress = { visible: true, text: '正在修复文件类型信息...', fileName };
 
       try {
-        // 第一步：先确保 content-type 是对的。这一步很关键——如果不先修复，
-        // 下一步用网络地址加载视频时，浏览器会读到旧的/缺失的 content-type，
-        // 根本不知道这是个视频，直接加载失败。这一步只更新元数据，
-        // 不需要重新上传文件本体，很快。
-        await axios.post(`/api/write/items/${apiPath(key)}?fixMetadata`, { contentType: guessedType });
+        // 第一步：只有存的 content-type 不对（或未知）时才先修复。这一步很关键——
+        // 如果不先修复，下一步用网络地址加载视频时，浏览器会读到旧的/缺失的
+        // content-type，根本不知道这是个视频，直接加载失败。类型已正确时跳过，
+        // 省一次整文件重写（M9）。这一步只更新元数据，不需要重新上传文件本体。
+        const storedType = file.httpMetadata?.contentType || null;
+        if (storedType !== guessedType) {
+          await axios.post(`/api/write/items/${apiPath(key)}?fixMetadata`, { contentType: guessedType });
+        }
 
         this.centerProgress.text = guessedType.startsWith('video/')
           ? '正在读取视频帧（大文件可能需要几秒）...'
@@ -2596,7 +2662,8 @@ export default {
 
         const digestHex = await blobDigest(thumbnailBlob);
         await axios.put(`/api/write/items/${apiPath('_$flaredrive$/thumbnails/' + digestHex + '.png')}`, thumbnailBlob);
-        await axios.post(`/api/write/items/${apiPath(key)}?fixMetadata`, { thumbnail: digestHex });
+        // 最后一次 fixMetadata 同时写回 contentType 和 thumbnail（端点支持两个字段）
+        await axios.post(`/api/write/items/${apiPath(key)}?fixMetadata`, { contentType: guessedType, thumbnail: digestHex });
 
         await this.fetchFiles();
         this.showCustomToast(`"${fileName}" 的缩略图已重新生成`, 'success');
@@ -2645,8 +2712,23 @@ export default {
         const currentName = key.split('/').pop();
         const newName = await this.showInputPrompt("重命名文件", "新名称:", currentName);
         if (!newName) return;
+        // L9：新名称只能是单个文件名，不能包含路径分隔符
+        if (newName.includes('/')) {
+          this.showCustomToast('新名称不能包含 /，请只输入文件名', 'error');
+          return;
+        }
+        if (newName === currentName) return;
         await this.copyPaste(key, `${this.cwd}${newName}`);
-        await this.deleteFile(key);
+        // L9：复制成功但删除原文件失败时，两个文件都存在——必须明确告诉用户，
+        // 而不是报一句含糊的"重命名失败"。
+        try {
+          await this.deleteFile(key);
+        } catch (deleteError) {
+          console.error('重命名：删除原文件失败:', deleteError);
+          this.showCustomToast(`已复制到新名称 "${newName}"，但删除原文件失败，两个文件都存在`, 'warning');
+          this.fetchFiles();
+          return;
+        }
         this.fetchFiles();
       } catch (error) {
         if (error === null) return; // 用户取消
@@ -2983,9 +3065,12 @@ export default {
     },
 
     // 新增：递归获取目录下所有文件和子目录
+    // M6：按 marker 循环拉完；超过 20 页（40 万个对象）时抛出错误，调用方
+    // （删除/移动文件夹）会中止并提示，不再删了标记就报"已删除"。
     async getAllItems(prefix) {
       const items = [];
       let marker = null;
+      let pages = 0;
 
       do {
         const url = new URL(`/api/children/${apiPath(prefix)}`, window.location.origin);
@@ -3022,6 +3107,10 @@ export default {
         }
 
         marker = data.marker;
+        pages++;
+        if (pages > 20) {
+          throw new Error('目录过大（超过 40 万个对象），无法安全枚举，请分批操作');
+        }
       } while (marker);
 
       return items;
@@ -3047,6 +3136,8 @@ export default {
 
       this.isSearching = true;
       this.searchResults = [];
+      this.searchDepthLimited = false;
+      this.searchTruncated = false;
 
       try {
         // 递归搜索所有目录
@@ -3059,7 +3150,8 @@ export default {
       }
     },
 
-    // 在指定目录中搜索
+    // 在指定目录中搜索（M6：按 marker 拉完该目录的所有页；深度上限 5 层，
+    // 触及时置 searchDepthLimited，调用方在界面上提示）
     async searchInDirectory(directory, searchTerm) {
       const results = [];
 
@@ -3071,49 +3163,64 @@ export default {
           headers['Authorization'] = `Basic ${savedCredentials}`;
         }
 
-        const response = await fetch(`/api/children/${apiPath(directory)}`, { headers });
-        const data = await response.json();
-        this.registerRawToken(data);
+        let marker = null;
+        let pages = 0;
+        const seenFolders = new Set();
+        do {
+          const url = new URL(`/api/children/${apiPath(directory)}`, window.location.origin);
+          if (marker) url.searchParams.set('marker', marker);
+          const response = await fetch(url, { headers });
+          const data = await response.json();
+          this.registerRawToken(data);
 
-        if (data.needLogin) {
-          return results;
-        }
+          if (data.needLogin) {
+            return results;
+          }
 
-        // 搜索文件
-        if (data.value) {
-          for (const file of data.value) {
-            const fileName = file.key.split('/').pop();
-            if (fileName.toLowerCase().includes(searchTerm.toLowerCase())) {
-              results.push({
-                ...file,
-                isFolder: false,
-                displayPath: file.key
-              });
+          // 搜索文件
+          if (data.value) {
+            for (const file of data.value) {
+              const fileName = file.key.split('/').pop();
+              if (fileName.toLowerCase().includes(searchTerm.toLowerCase())) {
+                results.push({
+                  ...file,
+                  isFolder: false,
+                  displayPath: file.key
+                });
+              }
             }
           }
-        }
 
-        // 搜索文件夹并递归
-        if (data.folders) {
-          for (const folder of data.folders) {
-            const folderName = folder.split('/').filter(Boolean).pop();
+          // 搜索文件夹并递归
+          if (data.folders) {
+            for (const folder of data.folders) {
+              if (seenFolders.has(folder)) continue;
+              seenFolders.add(folder);
+              const folderName = folder.split('/').filter(Boolean).pop();
 
-            // 如果文件夹名匹配搜索词，添加到结果
-            if (folderName && folderName.toLowerCase().includes(searchTerm.toLowerCase())) {
-              results.push({
-                key: folder,
-                isFolder: true,
-                displayPath: folder
-              });
-            }
+              // 如果文件夹名匹配搜索词，添加到结果
+              if (folderName && folderName.toLowerCase().includes(searchTerm.toLowerCase())) {
+                results.push({
+                  key: folder,
+                  isFolder: true,
+                  displayPath: folder
+                });
+              }
 
-            // 递归搜索子目录（限制深度避免无限递归）
-            if (folder.split('/').length < 5) { // 最多搜索5层深度
-              const subResults = await this.searchInDirectory(folder, searchTerm);
-              results.push(...subResults);
+              // 递归搜索子目录（限制深度避免无限递归）
+              if (folder.split('/').length < 5) { // 最多搜索5层深度
+                const subResults = await this.searchInDirectory(folder, searchTerm);
+                results.push(...subResults);
+              } else {
+                this.searchDepthLimited = true;
+              }
             }
           }
-        }
+
+          marker = data.marker;
+          pages++;
+        } while (marker && pages < 5);
+        if (marker) this.searchTruncated = true;
       } catch (error) {
         console.error(`搜索目录 ${directory} 失败:`, error);
       }

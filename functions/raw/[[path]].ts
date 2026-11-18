@@ -27,7 +27,14 @@ async function canRead(context, bucket, path: string): Promise<boolean> {
 }
 
 async function handle(context, headOnly: boolean) {
-  const [bucket, path] = parseBucketPath(context);
+  let bucket, path: string;
+  try {
+    [bucket, path] = parseBucketPath(context);
+  } catch (e: any) {
+    // L10：路径解码失败返回 400，而不是 500
+    if (e?.status === 400) return new Response("路径无效", { status: 400 });
+    throw e;
+  }
   if (!bucket) return notFound();
 
   if (!(await canRead(context, bucket, path))) {

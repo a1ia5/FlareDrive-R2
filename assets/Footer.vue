@@ -20,9 +20,9 @@
     </div>
 
     <div class="project-links">
-      <strong>到这已经是第四开了:</strong><a href="https://github.com/marktube/FlareDrive-R2" target="_blank"
+      <strong>本项目：</strong><a href="https://github.com/marktube/FlareDrive-R2" target="_blank"
         rel="noopener noreferrer">FlareDrive-R2增强优化版</a>
-      <strong>到这已经是第三开了:</strong><a href="https://github.com/52op/FlareDrive-R2" target="_blank"
+      <strong>上游项目：</strong><a href="https://github.com/52op/FlareDrive-R2" target="_blank"
         rel="noopener noreferrer">FlareDrive-R2增强版</a>
       <strong>感谢:</strong><a href="https://github.com/willow-god/FlareDrive-R2" target="_blank"
         rel="noopener noreferrer">FlareDrive-R2</a>
@@ -30,10 +30,10 @@
         rel="noopener noreferrer">Cloudflare-R2-OSS</a>
     </div>
 
-    <div class="powered">Powered by <a href="https://workers.cloudflare.com/" target="_blank"
-        rel="noopener noreferrer">Cloudflare Workers</a></div>
+    <div class="powered">由 <a href="https://workers.cloudflare.com/" target="_blank"
+        rel="noopener noreferrer">Cloudflare Workers</a> 提供支持</div>
 
-    <div style="margin:10px 0;">© 2025 FlareDrive. All rights reserved.</div>
+    <div style="margin:10px 0;">© 2026 FlareDrive · 保留所有权利</div>
   </footer>
 </template>
 
@@ -45,7 +45,7 @@ export default {
       homeUrl: "https://blog.liuyc.uk/about.html",
       blogUrl: "https://blog.liuyc.uk/",
       githubUrl: "https://github.com/marktube",
-      emailUrl: "mailto:liuyc@sem.tsinghua.edu.cn"
+      emailUrl: "mailto:yc_liu@mail.tsinghua.edu.cn"
     };
   },
   mounted() {
@@ -92,7 +92,7 @@ export default {
   margin-top: 30px;
   text-align: center;
   padding: 20px;
-  background-color: #ffffff77;
+  background-color: #ffffffd9;
   font-size: 16px;
   border-radius: 50% 50% 0 0;
 

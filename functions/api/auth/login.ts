@@ -16,8 +16,20 @@ function getClientIP(request) {
 }
 
 // 检查用户是否被封禁
+// L3：LOGIN_ATTEMPTS 未绑定时限流是静默关闭的——在日志里大声报一次
+// （每个 isolate 只报一次，避免刷屏），并在 README 里列为必绑项。
+let warnedNoLoginAttemptsKv = false;
+function warnLoginLimitDisabled() {
+    if (warnedNoLoginAttemptsKv) return;
+    warnedNoLoginAttemptsKv = true;
+    console.error(
+        "[SECURITY] LOGIN_ATTEMPTS KV 未绑定，登录限流已关闭：同一账号/IP 可无限尝试密码。请在 Cloudflare Pages 设置里绑定 LOGIN_ATTEMPTS KV 命名空间。"
+    );
+}
+
 async function checkLoginLimit(context, username, clientIP) {
     if (!context.env.LOGIN_ATTEMPTS) {
+        warnLoginLimitDisabled();
         return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
     }
 
@@ -178,20 +190,18 @@ export async function onRequestPost(context) {
         if(!permissions) {
             await recordLoginFailure(context, username, clientIP);
 
-            // 重新检查限制状态，获取最新的剩余次数
+            // 重新检查限制状态
             const updatedLimitCheck = await checkLoginLimit(context, username, clientIP);
+            // L3：失败消息不再透露剩余尝试次数（攻击者可用它判断账号是否存在 /
+            // 探测限流状态）；只在已触发锁定时告知锁定。
             let message = "用户名或密码错误";
-
-            if (updatedLimitCheck.allowed && updatedLimitCheck.remainingAttempts < LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS) {
-                message += `，剩余尝试次数：${updatedLimitCheck.remainingAttempts}`;
-            } else if (!updatedLimitCheck.allowed && updatedLimitCheck.banned) {
+            if (!updatedLimitCheck.allowed && updatedLimitCheck.banned) {
                 message = updatedLimitCheck.message;
             }
 
             return new Response(JSON.stringify({
                 success: false,
                 message: message,
-                remainingAttempts: updatedLimitCheck.remainingAttempts,
                 banned: !updatedLimitCheck.allowed && updatedLimitCheck.banned
             }), {
                 status: updatedLimitCheck.allowed ? 401 : 429,

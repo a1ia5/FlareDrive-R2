@@ -28,7 +28,7 @@ import { applyObjectSecurityHeaders, formatContentRange, pickContentType } from 
 import { encodeKeyForUrl } from "@/utils/signing";
 
 const DAV_BASE = "/dav/";
-const ALLOW = "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK";
+const ALLOW = "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND";
 const WRITE_METHODS = new Set(["PUT", "DELETE", "MKCOL", "COPY", "MOVE", "PROPPATCH", "LOCK", "UNLOCK"]);
 const MAX_BUFFERED_UPLOAD = 64 * 1024 * 1024;
 
@@ -75,16 +75,22 @@ async function resolve(bucket, path: string, wantDir: boolean): Promise<Resource
   return { kind: "none" };
 }
 
-async function listAllKeys(bucket, prefix: string): Promise<string[]> {
+// L11：最多拉 20 页（2 万个对象）。超过时 truncated 为 true，调用方必须
+// 拒绝操作（返回 507），而不是对不完整的 key 集合执行删除/复制。
+const LIST_ALL_MAX_PAGES = 20;
+
+async function listAllKeys(bucket, prefix: string): Promise<{ keys: string[]; truncated: boolean }> {
   const keys: string[] = [];
   let cursor: string | undefined = undefined;
-  for (;;) {
+  let truncated = false;
+  for (let page = 0; page < LIST_ALL_MAX_PAGES; page++) {
     const list = await bucket.list({ prefix, cursor });
     for (const o of list.objects) keys.push(o.key);
+    truncated = !!list.truncated;
     if (!list.truncated) break;
     cursor = list.cursor;
   }
-  return keys;
+  return { keys, truncated };
 }
 
 async function deleteKeys(bucket, keys: string[]): Promise<void> {
@@ -153,8 +159,10 @@ async function propfind(context, bucket, user: UserInfo, path: string, wantDir: 
     const depth = context.request.headers.get("Depth");
     if (depth !== "0") {
       // Depth: infinity 也按 1 处理
+      // L11：最多拉 20 页（2 万个对象）；超过时返回 507，而不是静默返回不完整列表
       let cursor: string | undefined = undefined;
-      for (;;) {
+      let truncated = false;
+      for (let page = 0; page < LIST_ALL_MAX_PAGES; page++) {
         const list = await bucket.list({ prefix, delimiter: "/", cursor, include: ["httpMetadata"] });
         for (const folder of list.delimitedPrefixes || []) {
           if (isInternalPath(folder) || !userCanTraverse(user, env, folder)) continue;
@@ -167,9 +175,11 @@ async function propfind(context, bucket, user: UserInfo, path: string, wantDir: 
           if (!userCanRead(user, env, object.key)) continue;
           parts.push(propResponse(hrefFor(object.key, false), fileProps(object)));
         }
+        truncated = !!list.truncated;
         if (!list.truncated) break;
         cursor = list.cursor;
       }
+      if (truncated) return text(507, "目录过大，无法完整列出，请分目录查看");
     }
   }
 
@@ -259,7 +269,10 @@ async function deleteResource(context, bucket, user: UserInfo, path: string, wan
 
   const prefix = path + "/";
   if (!userCanWrite(user, context.env, prefix)) return text(403, "没有写入权限");
-  await deleteKeys(bucket, await listAllKeys(bucket, prefix));
+  // L11：目录过大时拒绝删除，而不是删掉不完整的 key 集合后报成功
+  const { keys, truncated } = await listAllKeys(bucket, prefix);
+  if (truncated) return text(507, "目录过大，无法完整删除，请分批操作");
+  await deleteKeys(bucket, keys);
   return text(204);
 }
 
@@ -346,12 +359,15 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
   const dstExisted = existing.kind !== "none";
   // 覆盖时需要知道旧目标里有哪些 key：提交完成后删掉不在新内容里的旧文件
   // （替换而不是合并；文件/目录类型互换时，旧目标的整个 key 也在这里面）。
-  const oldDstKeys: string[] =
-    existing.kind === "dir"
-      ? await listAllKeys(bucket, dstPrefix)
-      : existing.kind === "file"
-        ? [to]
-        : [];
+  // L11：旧目标过大、枚举不完整时直接拒绝，避免清理掉不完整的集合。
+  let oldDstKeys: string[] = [];
+  if (existing.kind === "dir") {
+    const listed = await listAllKeys(bucket, dstPrefix);
+    if (listed.truncated) return text(507, "目标目录过大，无法完整枚举，请分批操作");
+    oldDstKeys = listed.keys;
+  } else if (existing.kind === "file") {
+    oldDstKeys = [to];
+  }
 
   // H3/M5：两阶段复制。阶段一先把全部内容写到目标下的临时目录（源和原目标
   // 都原封不动）；阶段二逐个提交到最终位置，提交完再删暂存副本；全部成功后
@@ -393,7 +409,10 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
       committedAll = true;
       if (move) await bucket.delete(path);
     } else {
-      const keys = await listAllKeys(bucket, srcPrefix);
+      // L11：源目录过大、枚举不完整时直接拒绝，不能只复制其中一部分
+      const listed = await listAllKeys(bucket, srcPrefix);
+      if (listed.truncated) return await abort("源目录过大，无法完整复制，请分批操作");
+      const keys = listed.keys;
       const stagePrefix = dstPrefix + staging + "/";
       // 阶段一：暂存全部源文件（源和目标都原封不动）
       for (const key of keys) {
@@ -434,36 +453,11 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
 }
 
 // ---------------------------------------------------------------------------
-// LOCK / UNLOCK / PROPPATCH（最小实现，满足 Windows / macOS 客户端的写入流程）
-// ---------------------------------------------------------------------------
-
-function lock(context, path: string): Response {
-  const token = "opaquelocktoken:" + crypto.randomUUID();
-  const xml =
-    `<?xml version="1.0" encoding="utf-8"?><D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock>` +
-    `<D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope>` +
-    `<D:depth>infinity</D:depth><D:timeout>Second-3600</D:timeout>` +
-    `<D:locktoken><D:href>${token}</D:href></D:locktoken>` +
-    `<D:lockroot><D:href>${xmlEscape(hrefFor(path, false))}</D:href></D:lockroot>` +
-    `</D:activelock></D:lockdiscovery></D:prop>`;
-  return new Response(xml, {
-    status: 200,
-    headers: davHeaders({ "Content-Type": 'application/xml; charset="utf-8"', "Lock-Token": `<${token}>` }),
-  });
-}
-
-function proppatch(path: string, isDir: boolean): Response {
-  const xml =
-    `<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"><D:response>` +
-    `<D:href>${xmlEscape(hrefFor(path, isDir))}</D:href>` +
-    `<D:propstat><D:prop/><D:status>HTTP/1.1 200 OK</D:status></D:propstat>` +
-    `</D:response></D:multistatus>`;
-  return new Response(xml, {
-    status: 207,
-    headers: davHeaders({ "Content-Type": 'application/xml; charset="utf-8"' }),
-  });
-}
-
+// M10：LOCK / UNLOCK / PROPPATCH 不提供真正的锁。以前这里返回假的成功
+// （每次随机生成一个从不存储的 opaquelocktoken、UNLOCK 永远 204、
+// PROPPATCH 返回 207 但不持久化任何属性），会让客户端误以为文件已被独占
+// 锁定。诚实地返回 405：客户端按"不支持锁定"继续走（Office、Finder 等
+// 在 LOCK 失败时都会退回到无锁写入），而不是被假锁误导。
 // ---------------------------------------------------------------------------
 
 export async function onRequest(context) {
@@ -517,13 +511,9 @@ export async function onRequest(context) {
         return await copyOrMove(context, bucket, user, path, wantDir, true);
       case "LOCK":
       case "UNLOCK":
-      case "PROPPATCH": {
-        const target = path ? (wantDir ? path + "/" : path) : "";
-        if (!path || !userCanWrite(user, context.env, target)) return text(403, "没有写入权限");
-        if (method === "LOCK") return lock(context, path);
-        if (method === "UNLOCK") return text(204);
-        return proppatch(path, wantDir);
-      }
+      case "PROPPATCH":
+        // M10：不支持锁定，返回 405（见文件上方说明）
+        return text(405, "不支持锁定操作", { Allow: ALLOW });
       default:
         return text(405, "Method not allowed", { Allow: ALLOW });
     }

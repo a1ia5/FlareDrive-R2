@@ -1,5 +1,15 @@
 const THUMBNAIL_SIZE = 144;
 
+// L6：按"覆盖"（cover）方式把源画面画进 144×144 的方形缩略图：等比放大到
+// 填满整个方块，超出部分裁掉（居中裁剪），不再把宽屏/竖屏画面压扁成方形。
+function drawCover(ctx, source, sw, sh) {
+  const size = THUMBNAIL_SIZE;
+  const scale = Math.max(size / sw, size / sh);
+  const dw = sw * scale;
+  const dh = sh * scale;
+  ctx.drawImage(source, (size - dw) / 2, (size - dh) / 2, dw, dh);
+}
+
 async function captureImageFrame(ctx, srcUrl) {
   const image = await new Promise((resolve, reject) => {
     const img = new Image();
@@ -7,7 +17,7 @@ async function captureImageFrame(ctx, srcUrl) {
     img.onerror = () => reject(new Error("图片加载失败"));
     img.src = srcUrl;
   });
-  ctx.drawImage(image, 0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE);
+  drawCover(ctx, image, image.naturalWidth, image.naturalHeight);
 }
 
 // 画面平均亮度（0~255）。每隔几个像素取样一次就够了。
@@ -36,7 +46,7 @@ function loadVideo(srcUrl, timeoutMs) {
 
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error("Video load timeout"));
+      reject(new Error("视频加载超时"));
     }, timeoutMs);
 
     function cleanup() {
@@ -52,7 +62,7 @@ function loadVideo(srcUrl, timeoutMs) {
       // 后缀是 .mp4/.mov 不代表浏览器能解码里面的编码（例如部分 HEVC/H.265），
       // 这种情况纯前端没有办法生成缩略图。
       cleanup();
-      reject(new Error("Video failed to load: " + (videoEl.error ? videoEl.error.message : "unknown error")));
+      reject(new Error("视频加载失败：" + (videoEl.error ? videoEl.error.message : "未知错误")));
     }
 
     videoEl.addEventListener("loadeddata", onLoaded);
@@ -66,7 +76,7 @@ function seekTo(videoEl, time) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error("Video seek timeout"));
+      reject(new Error("视频跳转超时"));
     }, SEEK_TIMEOUT_MS);
     function cleanup() {
       clearTimeout(timer);
@@ -79,7 +89,7 @@ function seekTo(videoEl, time) {
     }
     function onError() {
       cleanup();
-      reject(new Error("Video seek failed"));
+      reject(new Error("视频跳转失败"));
     }
     videoEl.addEventListener("seeked", onSeeked);
     videoEl.addEventListener("error", onError);
@@ -112,9 +122,9 @@ async function captureVideoFrame(ctx, srcUrl, timeoutMs) {
         await seekTo(video, time);
       } catch (seekError) {
         if (best) break; // 已经有可用的帧，后面的取不到就算了
-        throw seekError;
+        continue; // L5：第一个时间点 seek 失败就跳过，试下一个，不要直接报错
       }
-      ctx.drawImage(video, 0, 0, size, size);
+      drawCover(ctx, video, video.videoWidth, video.videoHeight);
       const imageData = ctx.getImageData(0, 0, size, size);
       const brightness = frameBrightness(imageData);
       if (!best || brightness > best.brightness) best = { brightness, imageData };

@@ -79,7 +79,7 @@ rm admin.sql        # 里面有密码哈希，用完删掉
 | --- | --- | --- | --- |
 | `BUCKET` | R2 绑定 | 是 | 存放文件的存储桶 |
 | `DB` | D1 绑定 | 推荐 | 账户数据库。不绑定时只能使用环境变量账户 |
-| `LOGIN_ATTEMPTS` | KV 绑定 | 否 | 登录失败次数限制（5 次失败后锁定 30 分钟） |
+| `LOGIN_ATTEMPTS` | KV 绑定 | **是** | 登录失败次数限制（5 次失败后锁定 30 分钟）。**不绑定时登录限流完全关闭**（同一账号/IP 可无限尝试密码），服务端会在日志里报 `[SECURITY] LOGIN_ATTEMPTS KV 未绑定`。绑定后无需其他配置 |
 | `GUEST` | 变量 | 否 | 公开目录，逗号分隔，例如 `public/`。这些目录下的文件凭直链即可下载 |
 | `GUEST_LIST` | 变量 | 否 | 设为 `true` 时，未登录访客也可以浏览 `GUEST` 目录的文件列表。默认关闭 |
 | `SIGNING_SECRET` | 变量（建议加密） | 否 | 签名链接的密钥。不设置时自动生成并保存在存储桶内部 |
@@ -177,7 +177,7 @@ curl -X POST https://你的域名/api/sign \
 | rclone | `rclone config` 选择 `webdav`，vendor 选 `other` |
 | curl | `curl -u alice:密码 -T file.txt https://你的域名/dav/work/file.txt` |
 
-支持的方法：`OPTIONS` `PROPFIND` `GET` `HEAD` `PUT` `DELETE` `MKCOL` `COPY` `MOVE`，以及最小实现的 `LOCK` `UNLOCK` `PROPPATCH`（不提供真正的锁，只为满足 Windows / macOS 的写入流程）。
+支持的方法：`OPTIONS` `PROPFIND` `GET` `HEAD` `PUT` `DELETE` `MKCOL` `COPY` `MOVE`。`LOCK` / `UNLOCK` / `PROPPATCH` 返回 405：本站不提供真正的锁定，以前返回的假成功已去掉，客户端会按"不支持锁定"继续写入。单个目录超过 2 万个对象时，`PROPFIND` / `COPY` / `MOVE` / `DELETE` 返回 507（目录过大，请分目录操作），不会对不完整的对象集合执行操作。
 
 限制：
 

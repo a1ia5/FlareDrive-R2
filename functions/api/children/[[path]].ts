@@ -39,9 +39,12 @@ export async function onRequestGet(context) {
 
     // 此前只取第一页（最多 1000 个对象），超出的文件既看不到，
     // 递归删除/移动文件夹时也会被漏掉。
+    // M6：支持 ?marker= 续读，返回 marker（下一页的 R2 游标）和 truncated，
+    // 前端按 marker 循环拉完；超过 20 页（2 万个对象）时 truncated 为 true。
+    const url = new URL(context.request.url);
     const objects: any[] = [];
     const folderSet = new Set<string>();
-    let cursor: string | undefined = undefined;
+    let cursor: string | undefined = url.searchParams.get("marker") || undefined;
     let truncated = false;
     for (let page = 0; page < MAX_PAGES; page++) {
       const list = await bucket.list({
@@ -84,11 +87,14 @@ export async function onRequestGet(context) {
       folders,
       isGuest: authResult.isGuest,
       truncated,
+      marker: truncated ? cursor : null,
       rawToken,
       rawTokenPrefix: scopes.length > 1 ? prefix : null,
       rawTokenExpires: expires,
     });
   } catch (e) {
+    // L10：路径解码失败是客户端错误，返回 400 即可，不记 error 日志
+    if (e && (e as any).status === 400) return new Response("路径无效", { status: 400 });
     console.error("children error:", e);
     return new Response("服务器内部错误", { status: 500 });
   }

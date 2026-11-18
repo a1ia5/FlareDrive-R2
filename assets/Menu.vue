@@ -51,7 +51,8 @@ const emit = defineEmits(["update:modelValue", "click"]);
 }
 
 .menu-content {
-  top: 16px;
+  /* D4：下拉菜单从触发按钮下方展开（top: 100%），不再盖住触发按钮 */
+  top: 100%;
   position: absolute;
   background-color: white;
   z-index: 10002; /* 确保菜单内容在最上层 */

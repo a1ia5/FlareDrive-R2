@@ -17,7 +17,10 @@
     <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js" integrity="sha384-S5+w/JlcNAOymqXGNrvzn2F++XsaHTJdex6KE5VbKryfFgqJiRUJOgOkUqaiOZTf" crossorigin="anonymous"></script>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <!-- D4：首屏占位，Vue 挂载后会被替换，避免白屏 -->
+      <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; color: #666; font-size: 18px; font-family: sans-serif;">FlareDrive 加载中...</div>
+    </div>
     <script>
       // 环境变量配置
       window.ENV = {
