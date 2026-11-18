@@ -185,7 +185,8 @@
             { text: '按照名称排序A-Z' },
             { text: '按照大小递增排序' },
             { text: '按照大小递减排序' },
-            { text: '粘贴文件到此目录', disabled: !clipboard || !canWrite }
+            { text: '粘贴文件到此目录', disabled: !clipboard || !canWrite },
+            { text: '管理分享链接', disabled: !isLoggedIn }
           ]"
           @click="onMenuClick" />
         </div>
@@ -552,7 +553,7 @@
       <div style="padding: 20px; width: 360px; max-width: 90vw;">
         <h3 style="margin: 0 0 8px 0;">分享文件</h3>
         <p v-text="shareDialog.name" style="margin: 0 0 15px 0; color: #666; word-break: break-all;"></p>
-        <div v-if="!shareDialog.isPublic" style="margin-bottom: 15px;">
+        <div style="margin-bottom: 15px;">
           <div style="margin-bottom: 8px; color: #333;">有效期：</div>
           <div style="display: flex; gap: 8px;">
             <button
@@ -561,9 +562,35 @@
               @click="setShareDays(d)"
               :style="`flex: 1; padding: 8px; border: 1px solid ${shareDialog.days === d ? '#007bff' : '#ddd'}; background: ${shareDialog.days === d ? '#e3f2fd' : 'white'}; color: ${shareDialog.days === d ? '#007bff' : '#333'}; border-radius: 4px; cursor: pointer;`"
             >{{ d }} 天</button>
+            <button
+              @click="setShareDays(0)"
+              :style="`flex: 1; padding: 8px; border: 1px solid ${shareDialog.days === 0 ? '#007bff' : '#ddd'}; background: ${shareDialog.days === 0 ? '#e3f2fd' : 'white'}; color: ${shareDialog.days === 0 ? '#007bff' : '#333'}; border-radius: 4px; cursor: pointer;`"
+            >长期有效</button>
           </div>
+          <p v-if="shareDialog.isPublic" style="margin: 8px 0 0 0; color: #666; font-size: 13px;">这是公开文件，即使不分享也可直接访问。</p>
         </div>
-        <p v-else style="margin: 0 0 15px 0; color: #666;">公开文件，链接长期有效，无需设置有效期。</p>
+        <div style="margin-bottom: 15px;">
+          <div style="margin-bottom: 8px; color: #333;">访问密码（可选）：</div>
+          <input
+            type="password"
+            v-model="shareDialog.password"
+            @change="generateShareLink"
+            placeholder="留空表示无需密码"
+            autocomplete="new-password"
+            style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;"
+          />
+        </div>
+        <div style="margin-bottom: 15px;">
+          <div style="margin-bottom: 8px; color: #333;">下载次数上限（可选）：</div>
+          <input
+            type="number"
+            min="1"
+            v-model="shareDialog.maxDownloads"
+            @change="generateShareLink"
+            placeholder="留空表示不限次数"
+            style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;"
+          />
+        </div>
         <div v-if="shareDialog.loading" style="text-align: center; color: #666; padding: 10px 0;">正在生成链接…</div>
         <div v-else-if="shareDialog.url">
           <input
@@ -583,6 +610,35 @@
           </div>
         </div>
         <p v-if="shareDialog.error" style="color: #dc3545; margin: 10px 0 0 0;" v-text="shareDialog.error"></p>
+      </div>
+    </Dialog>
+
+    <!-- 分享管理对话框（D1）：列出自己创建的分享，支持复制与撤销 -->
+    <Dialog v-model="showSharesDialog">
+      <div style="padding: 20px; width: 480px; max-width: 90vw;">
+        <h3 style="margin: 0 0 8px 0;">管理分享链接</h3>
+        <p style="margin: 0 0 15px 0; color: #666; font-size: 13px;">下载次数按下载请求计数，预览不计入。撤销后链接立即失效。</p>
+        <div v-if="sharesLoading" style="text-align: center; color: #666; padding: 10px 0;">加载中…</div>
+        <div v-else-if="sharesError" style="color: #dc3545;" v-text="sharesError"></div>
+        <div v-else-if="!sharesList.length" style="text-align: center; color: #666; padding: 10px 0;">暂无分享链接</div>
+        <ul v-else style="list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto;">
+          <li v-for="s in sharesList" :key="s.id" style="border: 1px solid #eee; border-radius: 8px; padding: 10px; margin-bottom: 8px;">
+            <div style="font-weight: bold; word-break: break-all;" v-text="s.name"></div>
+            <div style="color: #666; font-size: 13px; word-break: break-all;" v-text="s.key"></div>
+            <div style="color: #666; font-size: 13px;">
+              {{ s.expiresAt ? '有效期至 ' + new Date(s.expiresAt * 1000).toLocaleString('zh-CN') : '长期有效' }}
+              · 已下载 {{ s.downloads }} 次{{ s.maxDownloads ? ' / 上限 ' + s.maxDownloads + ' 次' : '' }}
+              <span v-if="s.hasPassword">· 有密码</span>
+            </div>
+            <div style="display: flex; gap: 8px; margin-top: 8px;">
+              <button @click="copyShareManageUrl(s)" style="padding: 6px 12px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">复制链接</button>
+              <button @click="revokeShare(s)" style="padding: 6px 12px; border: 1px solid #dc3545; color: #dc3545; background: white; border-radius: 4px; cursor: pointer;">撤销</button>
+            </div>
+          </li>
+        </ul>
+        <div style="text-align: right; margin-top: 12px;">
+          <button @click="showSharesDialog = false" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">关闭</button>
+        </div>
       </div>
     </Dialog>
 
@@ -822,18 +878,26 @@ export default {
       resolve: null,
       reject: null
     },
-    // 分享对话框相关（H1/H2：统一的分享入口，生成只对单个文件有效的签名链接）
+    // 分享对话框相关（D1：有状态短分享链接，POST /api/shares 创建）
     showShareDialog: false,
     shareDialog: {
       key: '',
       name: '',
       days: 7,
+      password: '',
+      maxDownloads: '',
+      shareId: '',
       url: '',
       expiresText: '',
       isPublic: false,
       loading: false,
       error: ''
     },
+    // 分享管理对话框相关（D1）
+    showSharesDialog: false,
+    sharesList: [],
+    sharesLoading: false,
+    sharesError: '',
     // 浮动粘贴按钮相关
     pasteButtonPosition: { x: 0, y: 0 },
     isDraggingPasteButton: false,
@@ -1063,6 +1127,9 @@ export default {
         key,
         name: file ? file.name : key.split('/').pop(),
         days: 7,
+        password: '',
+        maxDownloads: '',
+        shareId: '',
         url: '',
         expiresText: '',
         isPublic: false,
@@ -1079,7 +1146,9 @@ export default {
       this.generateShareLink();
     },
 
-    // 向服务端申请一个只对该文件有效、带过期时间的签名链接（POST /api/sign）
+    // D1：向服务端申请一个有状态的短分享链接（POST /api/shares），返回
+    // /share/{id}。改选项重新生成时带上 replaceId，服务端会删掉上一条
+    // 同文件分享，避免管理页堆积孤儿记录。
     async generateShareLink() {
       const dialog = this.shareDialog;
       dialog.loading = true;
@@ -1090,19 +1159,27 @@ export default {
         const savedCredentials = localStorage.getItem('authCredentials');
         if (savedCredentials) headers['Authorization'] = `Basic ${savedCredentials}`;
 
-        const response = await fetch('/api/sign', {
+        const body = {
+          key: dialog.key,
+          days: dialog.days,
+          password: dialog.password || undefined,
+          maxDownloads: dialog.maxDownloads === '' || dialog.maxDownloads === null ? undefined : Number(dialog.maxDownloads),
+          replaceId: dialog.shareId || undefined
+        };
+        const response = await fetch('/api/shares', {
           method: 'POST',
           headers,
-          body: JSON.stringify({ key: dialog.key, expiresIn: Math.round(dialog.days * 86400) })
+          body: JSON.stringify(body)
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || !data.url) throw new Error(data.error || `生成链接失败（HTTP ${response.status}）`);
 
+        dialog.shareId = data.id;
         dialog.url = data.url;
         dialog.isPublic = !!data.public;
-        dialog.expiresText = data.public
-          ? '长期有效'
-          : new Date(data.expires * 1000).toLocaleString('zh-CN');
+        dialog.expiresText = data.expiresAt
+          ? new Date(data.expiresAt * 1000).toLocaleString('zh-CN')
+          : '长期有效';
         this.$nextTick(() => this.drawShareQR());
       } catch (error) {
         dialog.error = error.message || '生成链接失败';
@@ -1119,6 +1196,55 @@ export default {
         this.showCustomToast('分享链接已复制到剪贴板', 'success');
       } catch (error) {
         this.showCustomToast('复制失败：浏览器拒绝写入剪贴板', 'error');
+      }
+    },
+
+    // D1：打开分享管理，列出自己创建的分享（管理员看全部）
+    async openSharesDialog() {
+      if (!this.isLoggedIn) {
+        this.showLoginModal();
+        return;
+      }
+      this.showSharesDialog = true;
+      this.sharesLoading = true;
+      this.sharesError = '';
+      try {
+        const headers = {};
+        const savedCredentials = localStorage.getItem('authCredentials');
+        if (savedCredentials) headers['Authorization'] = `Basic ${savedCredentials}`;
+        const response = await fetch('/api/shares', { headers });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `加载失败（HTTP ${response.status}）`);
+        this.sharesList = data.shares || [];
+      } catch (error) {
+        this.sharesError = error.message || '加载失败';
+      } finally {
+        this.sharesLoading = false;
+      }
+    },
+
+    async copyShareManageUrl(share) {
+      try {
+        await this.writeClipboard(share.url);
+        this.showCustomToast('分享链接已复制到剪贴板', 'success');
+      } catch (error) {
+        this.showCustomToast('复制失败：浏览器拒绝写入剪贴板', 'error');
+      }
+    },
+
+    // D1：撤销分享（删记录，链接立即失效）
+    async revokeShare(share) {
+      try {
+        const headers = {};
+        const savedCredentials = localStorage.getItem('authCredentials');
+        if (savedCredentials) headers['Authorization'] = `Basic ${savedCredentials}`;
+        const response = await fetch(`/api/shares/${share.id}`, { method: 'DELETE', headers });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `撤销失败（HTTP ${response.status}）`);
+        this.sharesList = this.sharesList.filter((s) => s.id !== share.id);
+        this.showCustomToast('分享链接已撤销', 'success');
+      } catch (error) {
+        this.showCustomToast('撤销失败: ' + (error.message || '未知错误'), 'error');
       }
     },
 
@@ -2019,6 +2145,14 @@ export default {
           this.showUploadPopup = false;
           return;
         }
+        if (this.showShareDialog) {
+          this.showShareDialog = false;
+          return;
+        }
+        if (this.showSharesDialog) {
+          this.showSharesDialog = false;
+          return;
+        }
         if (this.isMultiSelectMode) {
           this.isMultiSelectMode = false;
           this.selectedFiles = [];
@@ -2217,6 +2351,9 @@ export default {
         case "粘贴文件到此目录":
           this.pasteFile();
           return; // 粘贴操作不需要排序
+        case "管理分享链接":
+          this.openSharesDialog();
+          return; // 管理操作不需要排序
       }
       this.files.sort((a, b) => {
         if (this.order === "大小↑") {
