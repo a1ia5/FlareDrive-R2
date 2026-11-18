@@ -461,7 +461,7 @@
         </li>
         <li>
           <button @click="openShareDialog(focusedItem.key)">
-            <span>复制分享链接（设置有效期）</span>
+            <span>分享</span>
           </button>
         </li>
         <li v-if="canWrite && canRegenerateThumbnail(focusedItem.key)">
