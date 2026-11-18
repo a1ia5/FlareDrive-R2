@@ -459,7 +459,7 @@
           </button>
         </li>
         <li>
-          <button @click="copyFile(focusedItem.key)">
+          <button @click="copyFile(focusedItem.key)" :disabled="isGuest">
             <span>复制</span>
           </button>
         </li>
