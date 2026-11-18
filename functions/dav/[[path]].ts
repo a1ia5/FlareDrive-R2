@@ -5,8 +5,12 @@
 //   - 权限和网页端完全一致（utils/auth.ts），必须用账户登录，不提供匿名访问；
 //   - _$flaredrive$/ 内部目录和 _$folder$ 标记对客户端不可见。
 //
-// R2 没有原生的移动/重命名，MOVE/COPY 是"逐个复制，全部成功后再删除源"，
-// 不是原子操作；单个请求能处理的对象数受 Workers 子请求数限制。
+// R2 没有原生的移动/重命名，MOVE/COPY 是"先暂存、再提交，全部成功后再删除源"，
+// 不是原子操作；单个请求能处理的对象数受 Workers 子请求数限制（暂存让每个文件
+// 多花一倍子请求，大目录可能触及上限而返回 507，但源和目标都保持原样）。
+// 覆盖目标时也一样：旧目标只有在新内容完整提交之后才会被清理，绝不在复制开始
+// 前删除。唯一无法完全避免的残留风险：R2 没有目录级原子替换，提交阶段中途失败
+// 时目标可能已被部分更新（暂存阶段失败则目标完全不受影响）。
 
 import { getBucket, parseBucketPath } from "@/utils/bucket";
 import {
@@ -330,49 +334,102 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
   const dstOk = userCanWrite(user, env, isDir ? dstPrefix : to);
   if (!srcOk || !dstOk) return text(403, "没有权限");
 
-  // 目标已存在：Overwrite: F → 412；否则先整个删除目标再写入（替换，而不是合并）
+  // 目标已存在：Overwrite: F → 412。注意这里不再像以前那样先删除目标
+  // （H3/M5）：旧目标只有在新内容完整提交之后才会被清理。
   const existing = await resolve(bucket, to, false);
   const overwrite = (context.request.headers.get("Overwrite") || "T").toUpperCase() !== "F";
   if (existing.kind !== "none") {
     if (!overwrite) return text(412, "目标已存在");
-    if (existing.kind === "dir") {
-      if (!userCanWrite(user, env, dstPrefix)) return text(403, "没有权限");
-      await deleteKeys(bucket, await listAllKeys(bucket, dstPrefix));
-    } else {
-      await bucket.delete(to);
-    }
+    if (existing.kind === "dir" && !userCanWrite(user, env, dstPrefix)) return text(403, "没有权限");
   }
+  const dstExisted = existing.kind !== "none";
+  // 覆盖时需要知道旧目标里有哪些 key：提交完成后删掉不在新内容里的旧文件
+  // （替换而不是合并；文件/目录类型互换时，旧目标的整个 key 也在这里面）。
+  const oldDstKeys: string[] =
+    existing.kind === "dir"
+      ? await listAllKeys(bucket, dstPrefix)
+      : existing.kind === "file"
+        ? [to]
+        : [];
 
-  const copied: string[] = [];
+  // H3/M5：两阶段复制。阶段一先把全部内容写到目标下的临时目录（源和原目标
+  // 都原封不动）；阶段二逐个提交到最终位置，提交完再删暂存副本；全部成功后
+  // 才删源（MOVE）并清理旧目标里多余的文件。任何一步失败都保留源；
+  // 目标在暂存阶段失败时完全不受影响。
+  const staging = ".flaredrive-staging-" + crypto.randomUUID();
+  const staged: string[] = []; // 已写入暂存区、尚未提交的 key
+  const committed: string[] = []; // 已提交到最终位置的 key
+  let committedAll = false; // 全部提交完成之后，失败也不再回滚已提交的文件
+  const abort = async (msg: string): Promise<Response> => {
+    try {
+      await deleteKeys(bucket, staged);
+    } catch {}
+    // 只有目标本来不存在、且尚未全部提交时，删掉已提交的新文件才是安全的回滚；
+    // 覆盖场景下已提交的文件无法恢复成旧内容，留着比删掉好。
+    if (!dstExisted && !committedAll) {
+      try {
+        await deleteKeys(bucket, committed);
+      } catch {}
+    }
+    return text(507, msg);
+  };
   try {
     if (!isDir) {
-      if (!(await copyObject(bucket, path, to))) return text(404, "Not found");
-      copied.push(to);
+      if (dstExisted) {
+        // 覆盖单个文件：先写到临时 key 再提交（R2 的 PUT 本身是原子的，
+        // 提交失败时旧文件仍在）。
+        const tmp = to + ".flaredrive-tmp-" + crypto.randomUUID();
+        if (!(await copyObject(bucket, path, tmp))) return await abort("复制失败，目标未改动");
+        staged.push(tmp);
+        if (!(await copyObject(bucket, tmp, to))) return await abort("复制失败，目标未改动");
+        committed.push(to);
+        await bucket.delete(tmp);
+        staged.splice(staged.indexOf(tmp), 1);
+      } else {
+        if (!(await copyObject(bucket, path, to))) return await abort("复制失败，目标未改动");
+        committed.push(to);
+      }
+      committedAll = true;
       if (move) await bucket.delete(path);
     } else {
       const keys = await listAllKeys(bucket, srcPrefix);
+      const stagePrefix = dstPrefix + staging + "/";
+      // 阶段一：暂存全部源文件（源和目标都原封不动）
       for (const key of keys) {
-        const target = dstPrefix + key.slice(srcPrefix.length);
-        if (await copyObject(bucket, key, target)) copied.push(target);
+        const stagedKey = stagePrefix + key.slice(srcPrefix.length);
+        if (!(await copyObject(bucket, key, stagedKey))) {
+          return await abort("复制失败，源和目标均未改动");
+        }
+        staged.push(stagedKey);
       }
       // 源目录没有显式标记时，给目标补一个，保证空目录也能显示
       if (!keys.includes(srcPrefix + FOLDER_MARKER)) {
-        await bucket.put(dstPrefix + FOLDER_MARKER, new Uint8Array(0));
-        copied.push(dstPrefix + FOLDER_MARKER);
+        await bucket.put(stagePrefix + FOLDER_MARKER, new Uint8Array(0));
+        staged.push(stagePrefix + FOLDER_MARKER);
       }
+      // 阶段二：逐个提交到最终位置（提交完成后删除暂存副本）
+      for (const stagedKey of [...staged]) {
+        const target = dstPrefix + stagedKey.slice(stagePrefix.length);
+        if (!(await copyObject(bucket, stagedKey, target))) {
+          return await abort(dstExisted ? "复制失败，目标可能已被部分更新" : "复制失败，操作已取消");
+        }
+        committed.push(target);
+        await bucket.delete(stagedKey);
+        staged.splice(staged.indexOf(stagedKey), 1);
+      }
+      // 全部提交成功后，删掉旧目标里不在新内容里的文件（替换而不是合并）
+      const stale = oldDstKeys.filter((k) => !committed.includes(k));
+      if (stale.length > 0) await deleteKeys(bucket, stale);
+      committedAll = true;
       // 全部复制成功之后才删除源
       if (move) await deleteKeys(bucket, keys);
     }
   } catch (e) {
     console.error("dav copy/move failed:", e);
-    // 复制中途失败：源还完整保留着，把已经写到目标的部分清理掉
-    try {
-      await deleteKeys(bucket, copied);
-    } catch {}
-    return text(507, "复制过程中出错，操作已取消");
+    return await abort("复制过程中出错，操作已取消");
   }
 
-  return text(existing.kind === "none" ? 201 : 204);
+  return text(dstExisted ? 204 : 201);
 }
 
 // ---------------------------------------------------------------------------
