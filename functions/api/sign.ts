@@ -38,6 +38,9 @@ export async function onRequestPost(context) {
 
   const user = await getRequestUser(context);
   if (!user) return json({ error: "需要登录" }, 401);
+  // 只读用户禁止生成签名分享链接：签名链接把文件以链接形式对外暴露，
+  // 属于写操作；仅置灰按钮不够，必须在服务端直接拒绝（与 /api/shares 一致）。
+  if (user.isReadOnly) return json({ error: "只读用户无法创建分享链接" }, 403);
   if (!userCanRead(user, env, key)) return json({ error: "没有该文件的访问权限" }, 403);
 
   const bucket = getBucket(context);
