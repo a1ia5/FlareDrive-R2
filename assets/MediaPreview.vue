@@ -5,7 +5,7 @@
       <div v-if="loading" class="loading-indicator">
         <div class="spinner"></div>
         <p>加载中...</p>
-        <p style="font-size: 12px; opacity: 0.7;">{{ currentMedia.url }}</p>
+        <p style="font-size: 12px; opacity: 0.7;">{{ currentMedia.name }}</p>
         <!-- 加载状态下的关闭按钮 -->
         <button class="control-btn close-btn loading-close-btn" @click="closePreview" title="关闭">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
