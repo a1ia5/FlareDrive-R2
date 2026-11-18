@@ -1,4 +1,4 @@
-import { checkPathPermission } from "@/utils/auth";
+import { checkPathPermission, getRequestUser } from "@/utils/auth";
 
 // 和真正的写接口用同一个判断函数，避免两处逻辑不一致
 async function checkWritePermission(context, dopath) {
@@ -6,46 +6,34 @@ async function checkWritePermission(context, dopath) {
 }
 
 export async function onRequestPost(context) {
-    // 声明在 try 外层，这样即使解析请求体失败，catch 块里也能安全访问 path
-    let requestBody: { path?: string } = {};
+    // V4：必须先登录再检查。未登录时返回 401 + {hasPermission:false}，
+    // 不回显请求体里的 path，也不回显内部构造的测试路径。
+    const user = await getRequestUser(context);
+    if (!user) {
+        return new Response(JSON.stringify({ hasPermission: false }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+        });
+    }
 
     try {
-        requestBody = await context.request.json();
-        const { path } = requestBody;
-
-        console.log('check-write-permission - checking path:', path);
+        const requestBody = await context.request.json();
+        const { path } = requestBody || {};
 
         // 构造测试路径，模拟真实的文件操作
         const testPath = path === '' ? 'test_file.txt' : `${path}test_file.txt`;
 
-        console.log('check-write-permission - test path:', testPath);
-
         const hasPermission = await checkWritePermission(context, testPath);
 
-        console.log('check-write-permission - result:', hasPermission);
-
-        return new Response(JSON.stringify({
-            hasPermission: hasPermission,
-            path: path,
-            testPath: testPath
-        }), {
+        return new Response(JSON.stringify({ hasPermission }), {
             status: 200,
-            headers: {
-                "Content-Type": "application/json"
-            }
+            headers: { "Content-Type": "application/json" },
         });
-
     } catch (error) {
         console.error('check-write-permission error:', error);
-        return new Response(JSON.stringify({
-            hasPermission: false,
-            error: error.message,
-            path: requestBody.path || 'unknown'
-        }), {
+        return new Response(JSON.stringify({ hasPermission: false }), {
             status: 200, // 返回200避免触发浏览器错误处理
-            headers: {
-                "Content-Type": "application/json"
-            }
+            headers: { "Content-Type": "application/json" },
         });
     }
 }
