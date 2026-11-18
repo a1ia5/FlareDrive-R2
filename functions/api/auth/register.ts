@@ -1,5 +1,6 @@
 import { resolveAccount } from "@/utils/auth";
 import { createD1User, getD1User, hasD1 } from "@/utils/d1auth";
+import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 
 function json(obj: unknown, status: number) {
     return new Response(JSON.stringify(obj), {
@@ -23,6 +24,8 @@ function json(obj: unknown, status: number) {
 // 只有调用方显式传入 isAdmin: true（且调用方本身必须已经是真正的管理员，
 // 已经在上面的权限校验里保证了这一点）才会创建出真正的管理员账户。
 export async function onRequestPost(context) {
+    // M4：注册是状态变更接口，先做 Origin 同源校验（无 Origin 的 curl 不受影响）
+    if (isCrossOriginRequest(context)) return crossOriginRejectedResponse();
     try {
         if (!hasD1(context)) {
             return json({ success: false, message: "D1 数据库 (DB 绑定) 未配置，请先在 Pages 项目中绑定 D1 数据库" }, 500);

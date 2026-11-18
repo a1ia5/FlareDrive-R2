@@ -1,7 +1,10 @@
 import { resolveAccount } from "@/utils/auth";
+import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 
 // 管理员解封用户API
 export async function onRequestPost(context) {
+    // M4：解封是状态变更接口，先做 Origin 同源校验（无 Origin 的 curl 不受影响）
+    if (isCrossOriginRequest(context)) return crossOriginRejectedResponse();
     try {
         const headers = new Headers(context.request.headers);
         

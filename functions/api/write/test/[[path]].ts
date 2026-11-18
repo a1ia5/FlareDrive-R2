@@ -5,12 +5,11 @@ export async function onRequest(context) {
         var headers = new Headers(context.request.headers);
 
         // 检查是否有Authorization头
+        // M4：这里不再返回 WWW-Authenticate，避免浏览器缓存 Basic 凭据后
+        // 被跨站请求利用（见 utils/csrf.ts）。未登录只返回普通 401。
         if(!headers.get('Authorization')) {
-            var header = new Headers()
-            header.set("WWW-Authenticate",'Basic realm="需要登录"')
             return new Response("没有操作权限", {
                 status: 401,
-                headers: header,
             });
         }
 

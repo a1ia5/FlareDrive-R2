@@ -1,6 +1,7 @@
 import { getRequestUser, userCanRead, getGuestDirs, isInternalPath, isSafeKey } from "@/utils/auth";
 import { getBucket } from "@/utils/bucket";
 import { signToken, clampShareTtl, encodeKeyForUrl } from "@/utils/signing";
+import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -12,6 +13,8 @@ function json(data, status = 200) {
 // POST /api/sign   { key: "dir/file.ext", expiresIn?: 秒 }
 // 为一个文件生成带过期时间的分享链接。调用者必须对该文件有读权限。
 export async function onRequestPost(context) {
+  // L2：生成分享链接是状态变更类操作，先做 Origin 同源校验（无 Origin 的 curl 不受影响）
+  if (isCrossOriginRequest(context)) return crossOriginRejectedResponse();
   let body: { key?: string; expiresIn?: number } = {};
   try {
     body = await context.request.json();

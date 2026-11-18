@@ -1,5 +1,6 @@
 import { resolveAccount, clearAccountCache } from "@/utils/auth";
 import { hasD1, updateD1Password } from "@/utils/d1auth";
+import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 
 function json(obj: unknown, status: number) {
     return new Response(JSON.stringify(obj), {
@@ -16,6 +17,8 @@ function json(obj: unknown, status: number) {
 // 密码固定在部署配置里，无法在线修改，会提示用户联系管理员在 Cloudflare
 // Pages 的环境变量中修改。
 export async function onRequestPost(context) {
+    // M4：改密码是状态变更接口，先做 Origin 同源校验（无 Origin 的 curl 不受影响）
+    if (isCrossOriginRequest(context)) return crossOriginRejectedResponse();
     try {
         const headers = new Headers(context.request.headers);
         const authHeader = headers.get("Authorization");
