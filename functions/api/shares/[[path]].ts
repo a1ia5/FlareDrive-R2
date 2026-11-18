@@ -43,6 +43,11 @@ export async function onRequest(context) {
   if (!user) {
     return json({ error: "需要登录" }, 401);
   }
+  // 只读用户禁止创建、查看和管理分享链接：分享会把文件以链接形式
+  // 对外暴露，属于写操作；仅置灰按钮不够，必须在服务端直接拒绝。
+  if (user.isReadOnly) {
+    return json({ error: "只读用户无法创建或管理分享链接" }, 403);
+  }
 
   const bucket = getBucket(context);
   if (!bucket) return json({ error: "存储桶未配置" }, 500);
