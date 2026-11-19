@@ -49,8 +49,8 @@
       <!-- 音频预览：文件名、提示 pill、播放器以 pill 为中心竖排——
            文件名在 pill 上方 24px，播放器在 pill 下方 24px，左右箭头在
            正中间两侧，三者互不遮挡 -->
-      <div v-else-if="isAudio" class="audio-viewer">
-        <div class="audio-info">
+      <div v-else-if="isAudio" class="audio-viewer" :class="{ 'mobile-audio': isMobile }">
+        <div v-if="isMobile" class="audio-info">
           <p class="audio-name">{{ currentMedia.name }}</p>
         </div>
         <audio
@@ -393,6 +393,12 @@ export default {
       this.error = false;
       this.resetImage();
 
+      // 桌面端切到音频时不自动隐藏控制栏（v10 的行为）；移动端保持自动隐藏
+      if (this.isAudio && !this.isMobile) {
+        this.controlsAutoHide = false;
+        this.clearControlsHideTimer();
+      }
+
       // 强制触发图片加载检查
       this.$nextTick(() => {
         this.checkImageLoad();
@@ -546,6 +552,9 @@ export default {
 
     // 控制栏自动隐藏功能
     startControlsHideTimer() {
+      // 桌面端音频不自动隐藏（v10 的行为）：桌面没有 pill，隐藏后只能靠
+      // 移动鼠标唤回；移动端恢复自动隐藏，pill 才会出现。
+      if (this.isAudio && !this.isMobile) return;
       this.clearControlsHideTimer();
       this.controlsHideTimer = setTimeout(() => {
         this.controlsAutoHide = true;
@@ -825,17 +834,28 @@ export default {
   outline: none;
 }
 
-/* 音频播放器：文件名、pill、播放器以屏幕正中为锚点竖排。
-   .audio-viewer 只做定位上下文，文件名和播放器都按中线绝对定位；
+/* 音频播放器：桌面沿用 v10 的底部布局（只有播放器一个元素，固定在
+   下方区域，不自动隐藏控制栏）；移动端才用 pill 居中的竖排——文件名、
+   pill、播放器以屏幕正中为锚点，文件名和播放器按中线绝对定位，
    pill 本身在 .preview-controls 里，音频时同样以中线定位（.audio-hint）。 */
 .audio-viewer {
-  position: relative;
   width: 100%;
   height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 20px 110px;
   box-sizing: border-box;
 }
 
-.audio-info {
+.audio-viewer.mobile-audio {
+  position: relative;
+  display: block;
+  padding: 0;
+}
+
+.audio-viewer.mobile-audio .audio-info {
   position: absolute;
   left: 0;
   right: 0;
@@ -854,13 +874,16 @@ export default {
 }
 
 .preview-audio {
+  width: min(480px, 90vw);
+  outline: none;
+}
+
+.audio-viewer.mobile-audio .preview-audio {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
   /* 顶边在中线下方 48px：pill 下沿（中线 + 24px）再往下 24px */
   top: calc(50% + 48px);
-  width: min(480px, 90vw);
-  outline: none;
 }
 
 /* 错误状态 */
