@@ -50,7 +50,7 @@
            文件名在 pill 上方 24px，播放器在 pill 下方 24px，左右箭头在
            正中间两侧，三者互不遮挡 -->
       <div v-else-if="isAudio" class="audio-viewer" :class="{ 'mobile-audio': isMobile }">
-        <div v-if="isMobile" class="audio-info">
+        <div class="audio-info">
           <p class="audio-name">{{ currentMedia.name }}</p>
         </div>
         <audio
@@ -393,12 +393,6 @@ export default {
       this.error = false;
       this.resetImage();
 
-      // 桌面端切到音频时不自动隐藏控制栏（v10 的行为）；移动端保持自动隐藏
-      if (this.isAudio && !this.isMobile) {
-        this.controlsAutoHide = false;
-        this.clearControlsHideTimer();
-      }
-
       // 强制触发图片加载检查
       this.$nextTick(() => {
         this.checkImageLoad();
@@ -552,9 +546,6 @@ export default {
 
     // 控制栏自动隐藏功能
     startControlsHideTimer() {
-      // 桌面端音频不自动隐藏（v10 的行为）：桌面没有 pill，隐藏后只能靠
-      // 移动鼠标唤回；移动端恢复自动隐藏，pill 才会出现。
-      if (this.isAudio && !this.isMobile) return;
       this.clearControlsHideTimer();
       this.controlsHideTimer = setTimeout(() => {
         this.controlsAutoHide = true;
@@ -834,18 +825,19 @@ export default {
   outline: none;
 }
 
-/* 音频播放器：桌面沿用 v10 的底部布局（只有播放器一个元素，固定在
-   下方区域，不自动隐藏控制栏）；移动端才用 pill 居中的竖排——文件名、
-   pill、播放器以屏幕正中为锚点，文件名和播放器按中线绝对定位，
-   pill 本身在 .preview-controls 里，音频时同样以中线定位（.audio-hint）。 */
+/* 音频播放器：桌面回到 v8 的居中布局（文件名和播放器上下居中排布）；
+   移动端才用 pill 居中的竖排——文件名、pill、播放器以屏幕正中为锚点，
+   文件名和播放器按中线绝对定位，pill 本身在 .preview-controls 里，
+   音频时同样以中线定位（.audio-hint）。 */
 .audio-viewer {
   width: 100%;
   height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: flex-end;
-  padding: 0 20px 110px;
+  justify-content: center;
+  gap: 20px;
+  padding: 0 20px;
   box-sizing: border-box;
 }
 
@@ -855,15 +847,18 @@ export default {
   padding: 0;
 }
 
+.audio-info {
+  text-align: center;
+  color: white;
+  max-width: 100%;
+}
+
 .audio-viewer.mobile-audio .audio-info {
   position: absolute;
   left: 0;
   right: 0;
   /* 底边在中线上方 48px：pill 上沿（中线 - 24px）再往上 24px */
   bottom: calc(50% + 48px);
-  text-align: center;
-  color: white;
-  max-width: 100%;
 }
 
 .audio-name {
