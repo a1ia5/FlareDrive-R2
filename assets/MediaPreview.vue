@@ -46,11 +46,9 @@
         </video>
       </div>
 
-      <!-- 音频预览 -->
+      <!-- 音频预览：文件名只在顶部控制栏显示（音频不自动隐藏控制栏），
+           这里只放播放器，避免文件名和顶部按钮重叠 -->
       <div v-else-if="isAudio" class="audio-viewer">
-        <div class="audio-info">
-          <p class="audio-name">{{ currentMedia.name }}</p>
-        </div>
         <audio
           :src="currentMedia.url"
           class="preview-audio"
@@ -391,6 +389,12 @@ export default {
       this.error = false;
       this.resetImage();
 
+      // 切到音频时不自动隐藏控制栏（文件名一直在顶部栏显示）
+      if (this.isAudio) {
+        this.controlsAutoHide = false;
+        this.clearControlsHideTimer();
+      }
+
       // 强制触发图片加载检查
       this.$nextTick(() => {
         this.checkImageLoad();
@@ -544,6 +548,9 @@ export default {
 
     // 控制栏自动隐藏功能
     startControlsHideTimer() {
+      // 音频不自动隐藏：音频没有画面可看，控制栏（文件名、计数、下载、分享、关闭）
+      // 就是全部界面；隐藏后只剩一个播放条，反而要多点一下才能看到文件名。
+      if (this.isAudio) return;
       this.clearControlsHideTimer();
       this.controlsHideTimer = setTimeout(() => {
         this.controlsAutoHide = true;
@@ -830,25 +837,11 @@ export default {
   display: flex;
   flex-direction: column;
   align-items: center;
-  /* 文件名放上方、播放器放下方，中间留空给左右切换箭头；
-     上方留出顶部控制栏的位置，下方留出底部提示 pill 的位置。 */
-  justify-content: space-between;
-  gap: 20px;
-  padding: 76px 20px 110px;
+  /* 只有播放器一个元素，固定在下方区域，中间留空给左右切换箭头；
+     下方留出底部提示 pill 的位置。 */
+  justify-content: flex-end;
+  padding: 0 20px 110px;
   box-sizing: border-box;
-}
-
-.audio-info {
-  text-align: center;
-  color: white;
-  max-width: 100%;
-}
-
-.audio-name {
-  margin: 0;
-  font-size: 18px;
-  text-align: center;
-  word-break: break-all;
 }
 
 .preview-audio {
