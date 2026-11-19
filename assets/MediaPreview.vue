@@ -46,9 +46,13 @@
         </video>
       </div>
 
-      <!-- 音频预览：文件名只在顶部控制栏显示（音频不自动隐藏控制栏），
-           这里只放播放器，避免文件名和顶部按钮重叠 -->
+      <!-- 音频预览：文件名、提示 pill、播放器以 pill 为中心竖排——
+           文件名在 pill 上方 24px，播放器在 pill 下方 24px，左右箭头在
+           正中间两侧，三者互不遮挡 -->
       <div v-else-if="isAudio" class="audio-viewer">
+        <div class="audio-info">
+          <p class="audio-name">{{ currentMedia.name }}</p>
+        </div>
         <audio
           :src="currentMedia.url"
           class="preview-audio"
@@ -75,7 +79,7 @@
            @mouseleave="onControlsMouseLeave">
 
         <!-- 隐藏状态提示（仅移动端） -->
-        <div v-if="isMobile && controlsAutoHide" class="controls-hint" @click="showControls">
+        <div v-if="isMobile && controlsAutoHide" class="controls-hint" :class="{ 'audio-hint': isAudio }" @click="showControls">
           <svg viewBox="0 0 24 24" width="24" height="24" fill="white">
             <path d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9Z" />
           </svg>
@@ -389,12 +393,6 @@ export default {
       this.error = false;
       this.resetImage();
 
-      // 切到音频时不自动隐藏控制栏（文件名一直在顶部栏显示）
-      if (this.isAudio) {
-        this.controlsAutoHide = false;
-        this.clearControlsHideTimer();
-      }
-
       // 强制触发图片加载检查
       this.$nextTick(() => {
         this.checkImageLoad();
@@ -548,9 +546,6 @@ export default {
 
     // 控制栏自动隐藏功能
     startControlsHideTimer() {
-      // 音频不自动隐藏：音频没有画面可看，控制栏（文件名、计数、下载、分享、关闭）
-      // 就是全部界面；隐藏后只剩一个播放条，反而要多点一下才能看到文件名。
-      if (this.isAudio) return;
       this.clearControlsHideTimer();
       this.controlsHideTimer = setTimeout(() => {
         this.controlsAutoHide = true;
@@ -830,21 +825,40 @@ export default {
   outline: none;
 }
 
-/* 音频播放器 */
+/* 音频播放器：文件名、pill、播放器以屏幕正中为锚点竖排。
+   .audio-viewer 只做定位上下文，文件名和播放器都按中线绝对定位；
+   pill 本身在 .preview-controls 里，音频时同样以中线定位（.audio-hint）。 */
 .audio-viewer {
+  position: relative;
   width: 100%;
   height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  /* 只有播放器一个元素，固定在下方区域，中间留空给左右切换箭头；
-     下方留出底部提示 pill 的位置。 */
-  justify-content: flex-end;
-  padding: 0 20px 110px;
   box-sizing: border-box;
 }
 
+.audio-info {
+  position: absolute;
+  left: 0;
+  right: 0;
+  /* 底边在中线上方 48px：pill 上沿（中线 - 24px）再往上 24px */
+  bottom: calc(50% + 48px);
+  text-align: center;
+  color: white;
+  max-width: 100%;
+}
+
+.audio-name {
+  margin: 0;
+  font-size: 18px;
+  text-align: center;
+  word-break: break-all;
+}
+
 .preview-audio {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  /* 顶边在中线下方 48px：pill 下沿（中线 + 24px）再往下 24px */
+  top: calc(50% + 48px);
   width: min(480px, 90vw);
   outline: none;
 }
@@ -890,6 +904,18 @@ export default {
   cursor: pointer;
   backdrop-filter: blur(10px);
   animation: fadeInOut 2s ease-in-out infinite;
+}
+
+/* 音频时 pill 回到正中，做文件名和播放器的锚点；高度固定 48px
+   （图标 24px + 上下 padding 各 12px，本来就是 48px），让上下两个
+   24px 的间隔精确。视频/图片保持上面那条底部位置不变。 */
+.controls-hint.audio-hint {
+  top: 50%;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+  height: 48px;
+  box-sizing: border-box;
+  justify-content: center;
 }
 
 @keyframes fadeInOut {
