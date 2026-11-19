@@ -855,6 +855,7 @@ export default {
     backgroundImageUrl: "/assets/bg-cat.webp",
     needLogin: false,
     isGuest: true, // 默认为游客状态
+    guestDirs: [], // 访客目录（GUEST 环境变量），该目录下的文件不建分享、直接给公开直链
     isLoggedIn: false,
     currentUser: null, // 当前用户信息
     // 模态框相关
@@ -1161,9 +1162,19 @@ export default {
       return this.thumbToken ? `${base}?token=${this.thumbToken}` : base;
     },
 
+    // 该文件是否在访客目录（GUEST）下：访客目录本来就是公开可读的，
+    // 不建分享记录，点分享直接复制公开直链（与 /api/sign 的处理一致）。
+    isGuestDir(key) {
+      return (this.guestDirs || []).some((d) => {
+        const p = d.endsWith('/') ? d : d + '/';
+        return key.startsWith(p);
+      });
+    },
+
     // 打开统一的分享对话框（H1/H2）：生成只对该文件有效、带过期时间的
-    // 签名链接并显示在文本框里。公开文件直接显示长期有效的链接，不问有效期。
-    openShareDialog(key) {
+    // 签名链接并显示在文本框里。访客目录下的文件不打开对话框，
+    // 直接复制公开直链（不建分享记录，有效期/密码对公开文件没有意义）。
+    async openShareDialog(key) {
       if (this.isGuest || this.isReadOnlyUser) {
         this.showCustomToast(this.isReadOnlyUser ? '只读用户无法分享文件' : '请先登录', 'error');
         this.showContextMenu = false;
@@ -1173,6 +1184,17 @@ export default {
       // 不关预览，分享框会被盖在后面点不到。
       this.closeMediaPreview();
       this.showContextMenu = false;
+      // 访客目录：不建分享，直接复制公开直链（无令牌，永久有效）。
+      if (this.isGuestDir(key)) {
+        const url = window.location.origin + '/raw/' + key.split('/').map(encodeURIComponent).join('/');
+        try {
+          await this.writeClipboard(url);
+          this.showCustomToast('该文件已公开，已复制公开直链', 'success');
+        } catch (error) {
+          this.showCustomToast('复制失败：浏览器拒绝写入剪贴板', 'error');
+        }
+        return;
+      }
       const file = this.files.find((f) => f.key === key);
       this.shareDialog = {
         key,
@@ -1582,6 +1604,7 @@ export default {
           allFiles.push(...(data.value || []));
           for (const f of (data.folders || [])) folderSet.add(f);
           this.isGuest = data.isGuest || false;
+          this.guestDirs = data.guestDirs || [];
           this.isLoggedIn = !this.isGuest;
           if (!data.marker) { marker = null; break; }
           marker = data.marker;

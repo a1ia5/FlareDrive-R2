@@ -1,6 +1,7 @@
 // D1：有状态分享链接的管理接口。
 //
-//   POST   /api/shares        创建分享（登录 + 对文件有读权限）
+//   POST   /api/shares        创建分享（登录 + 对文件有读权限；
+//                              访客目录下的文件不建记录、直接返回公开直链）
 //   GET    /api/shares        列出分享（本人创建的；管理员看全部）
 //   DELETE /api/shares/{id}   撤销分享（创建者或管理员）
 //
@@ -9,6 +10,7 @@
 
 import { getBucket } from "@/utils/bucket";
 import { getRequestUser, userCanRead, isInternalPath, isThumbnailKey, getGuestDirs } from "@/utils/auth";
+import { encodeKeyForUrl } from "@/utils/signing";
 import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 import {
   createShareId,
@@ -68,6 +70,13 @@ export async function onRequest(context) {
     if (!userCanRead(user, context.env, key)) return json({ error: "没有该文件的访问权限" }, 403);
     const obj = await bucket.head(key);
     if (!obj) return json({ error: "文件不存在" }, 404);
+
+    // 访客目录下的文件本来就是公开的，不建分享记录，直接返回公开直链
+    // （与 /api/sign 的处理一致：有效期/密码对公开文件没有意义）。
+    if (getGuestDirs(context.env).length > 0 && userCanRead(null, context.env, key)) {
+      const origin = new URL(request.url).origin;
+      return json({ url: `${origin}/raw/${encodeKeyForUrl(key)}`, public: true });
+    }
 
     const id = createShareId();
     const record = {
