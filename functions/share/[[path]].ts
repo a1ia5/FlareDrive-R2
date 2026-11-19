@@ -123,7 +123,10 @@ export async function onRequestGet(context) {
     preview = `<audio class="preview" src="/share/${htmlEscape(id)}?preview=1" controls preload="metadata"></audio>`;
   }
 
-  const expiresText = share.expiresAt === null ? "长期有效" : "有效期至 " + new Date(share.expiresAt * 1000).toLocaleString("zh-CN");
+  // 分享页是服务端渲染：Worker 的默认时区是 UTC，而管理页在浏览器里按
+  // 访客本地时区渲染（站主在东八区），不指定时区会差 8 小时。
+  // 固定用 Asia/Shanghai，与管理页显示的时间一致。
+  const expiresText = share.expiresAt === null ? "长期有效" : "有效期至 " + new Date(share.expiresAt * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
   const limitText = share.maxDownloads === null ? "" : ` · 最多下载 ${share.maxDownloads} 次`;
 
   return page(
