@@ -1,7 +1,9 @@
 <template>
   <div v-if="show" class="media-preview-overlay" @click="closePreview">
     <div class="media-preview-container" @click.stop @touchstart="onContainerTouch">
-      <!-- 加载状态 -->
+      <!-- 加载状态：独立遮罩层，不再用 v-else-if 链挡住媒体元素——
+           视频/音频元素打开预览就立即挂载，边下边播；转圈只盖在上面，
+           媒体自身的 loadeddata/loadedmetadata 事件清掉它 -->
       <div v-if="loading" class="loading-indicator">
         <div class="spinner"></div>
         <p>加载中...</p>
@@ -12,6 +14,15 @@
             <path d="M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" />
           </svg>
         </button>
+      </div>
+
+      <!-- 错误状态：放在媒体分支之前，媒体加载失败时显示它而不是
+           一个坏掉的播放器 -->
+      <div v-if="error" class="error-state">
+        <svg viewBox="0 0 24 24" width="48" height="48" fill="#ff6b6b">
+          <path d="M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" />
+        </svg>
+        <p>{{ errorMessage }}</p>
       </div>
 
       <!-- 图片预览 -->
@@ -39,6 +50,8 @@
           class="preview-video"
           controls
           autoplay
+          playsinline
+          preload="metadata"
           @loadeddata="onVideoLoad"
           @error="onVideoError"
         >
@@ -56,19 +69,12 @@
           class="preview-audio"
           controls
           autoplay
+          preload="metadata"
           @loadedmetadata="onAudioLoad"
           @error="onAudioError"
         >
           您的浏览器不支持音频播放
         </audio>
-      </div>
-
-      <!-- 错误状态 -->
-      <div v-else-if="error" class="error-state">
-        <svg viewBox="0 0 24 24" width="48" height="48" fill="#ff6b6b">
-          <path d="M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" />
-        </svg>
-        <p>{{ errorMessage }}</p>
       </div>
 
       <!-- 控制栏 -->
@@ -577,14 +583,27 @@ export default {
       }
     },
 
-    // 用 Image 探针对所有媒体类型做加载检查：图片靠探针的 onload；
-    // 视频/音频靠探针的快速 onerror —— 模板里媒体元素是 v-else-if，
-    // 只有 loading 清掉后才会挂载，所以它们的 loadeddata 事件永远等
-    // 不到；探针置的瞬时 error 标志不会显示出来（媒体分支在 v-else-if
-    // 链里优先于 error 分支），随后媒体元素自己的 load 事件会把它复位。
-    // 不要再把探针限制为只对图片生效，否则视频/音频永远卡在加载中。
+    // 加载检查：只对图片用 Image 探针（图片小，探针几乎立即成功/失败，
+    // 且 <img> 自身也有 @load/@error）。
+    // 视频/音频不再探针：探针会把媒体文件当图片下载——移动端大文件要
+    // 下载很久才失败，之后媒体元素还要再下载一遍（双倍流量+双倍等待）。
+    // 现在媒体元素打开预览就立即挂载，靠自身的 loadeddata（视频）/
+    // loadedmetadata（音频）清掉 loading，失败走自身的 error 事件。
+    // （v3 时探针是唯一的解锁手段，所以当时不能限制；重构后媒体不再
+    // 等 loading，旧注释作废。）
     checkImageLoad() {
       if (!this.currentMedia.url) {
+        return;
+      }
+      if (!this.isImage && !this.isVideo && !this.isAudio) {
+        // 非媒体文件：直接进错误状态，不要一直转圈
+        this.loading = false;
+        this.error = true;
+        this.errorMessage = '不支持预览该文件类型';
+        return;
+      }
+      if (!this.isImage) {
+        // 视频/音频：元素已挂载，等它自己的事件，不探针
         return;
       }
 
@@ -765,8 +784,16 @@ export default {
   justify-content: center;
 }
 
-/* 加载状态 */
+/* 加载状态：覆盖在媒体上方的遮罩层，媒体元素在它下面立即挂载 */
 .loading-indicator {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
   text-align: center;
   color: white;
 }
