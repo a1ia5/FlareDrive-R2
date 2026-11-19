@@ -830,9 +830,11 @@ export default {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* 文件名放上方、播放器放下方，中间留空给左右切换箭头；
+     上方留出顶部控制栏的位置，下方留出底部提示 pill 的位置。 */
+  justify-content: space-between;
   gap: 20px;
-  padding: 0 20px;
+  padding: 76px 20px 110px;
   box-sizing: border-box;
 }
 
@@ -845,6 +847,7 @@ export default {
 .audio-name {
   margin: 0;
   font-size: 18px;
+  text-align: center;
   word-break: break-all;
 }
 
@@ -876,9 +879,12 @@ export default {
 /* 控制提示 */
 .controls-hint {
   position: absolute;
-  top: 50%;
+  /* 放到底部、离开屏幕正中间，不再遮挡文件名和播放器；
+     底部留 24px 边距，并算上 iPhone 的安全区（Home Indicator）。 */
+  top: auto;
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
   left: 50%;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
   background: rgba(0, 0, 0, 0.6);
   color: white;
   padding: 12px 20px;
