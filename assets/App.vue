@@ -1169,6 +1169,9 @@ export default {
         this.showContextMenu = false;
         return;
       }
+      // 预览打开时先关掉预览：分享框的层级（9998）低于预览浮层（10001），
+      // 不关预览，分享框会被盖在后面点不到。
+      this.closeMediaPreview();
       this.showContextMenu = false;
       const file = this.files.find((f) => f.key === key);
       this.shareDialog = {
