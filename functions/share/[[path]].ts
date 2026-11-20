@@ -10,6 +10,7 @@
 // 有效的 HMAC 令牌 Cookie（复用签名密钥），Cookie 本身不含密码。
 
 import { getBucket } from "@/utils/bucket";
+import { applyObjectSecurityHeaders } from "@/utils/response";
 import {
   shareKeyForId,
   checkShareAccess,
@@ -77,6 +78,11 @@ async function streamFile(context, key: string, download: boolean) {
     "Content-Disposition",
     `${download ? "attachment" : "inline"}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`
   );
+  // F1：分享流也要加对象安全头（与 /raw/、WebDAV 一致）。危险类型
+  // （html/svg/xml/js）会被这里强制改成 attachment 下载，不会在本站
+  // 域名下以内联方式执行脚本、读取 localStorage 里的登录凭据。
+  // 调用点在 Content-Disposition 之后，所以强制下载能覆盖上面的 inline。
+  applyObjectSecurityHeaders(headers, key);
   if (!("body" in object) || !object.body) return new Response(null, { status: 304, headers });
   if (request.headers.get("range") && object.range) {
     const range = object.range;

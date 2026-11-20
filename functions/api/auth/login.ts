@@ -1,127 +1,6 @@
 import { resolveAccount } from "@/utils/auth";
-
-// 登录限制配置
-const LOGIN_LIMIT_CONFIG = {
-    MAX_ATTEMPTS: 5,        // 最大尝试次数
-    BAN_DURATION: 30 * 60,  // 封禁时长（秒），30分钟
-    ATTEMPT_WINDOW: 60 * 60 // 尝试次数重置窗口（秒），1小时
-};
-
-// 获取客户端IP地址
-function getClientIP(request) {
-    return request.headers.get('CF-Connecting-IP') ||
-           request.headers.get('X-Forwarded-For') ||
-           request.headers.get('X-Real-IP') ||
-           'unknown';
-}
-
-// 检查用户是否被封禁
-// L3：LOGIN_ATTEMPTS 未绑定时限流是静默关闭的——在日志里大声报一次
-// （每个 isolate 只报一次，避免刷屏），并在 README 里列为必绑项。
-let warnedNoLoginAttemptsKv = false;
-function warnLoginLimitDisabled() {
-    if (warnedNoLoginAttemptsKv) return;
-    warnedNoLoginAttemptsKv = true;
-    console.error(
-        "[SECURITY] LOGIN_ATTEMPTS KV 未绑定，登录限流已关闭：同一账号/IP 可无限尝试密码。请在 Cloudflare Pages 设置里绑定 LOGIN_ATTEMPTS KV 命名空间。"
-    );
-}
-
-async function checkLoginLimit(context, username, clientIP) {
-    if (!context.env.LOGIN_ATTEMPTS) {
-        warnLoginLimitDisabled();
-        return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
-    }
-
-    const key = `login_limit:${username}:${clientIP}`;
-    const limitData = await context.env.LOGIN_ATTEMPTS.get(key);
-
-    if (!limitData) {
-        return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
-    }
-
-    const data = JSON.parse(limitData);
-    const now = Math.floor(Date.now() / 1000);
-
-    // 检查是否在封禁期内
-    if (data.bannedUntil && now < data.bannedUntil) {
-        const remainingBanTime = data.bannedUntil - now;
-        return {
-            allowed: false,
-            banned: true,
-            remainingBanTime,
-            message: `账户已被临时锁定，请在 ${Math.ceil(remainingBanTime / 60)} 分钟后重试`
-        };
-    }
-
-    // 检查尝试次数是否超限
-    if (data.attempts >= LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS) {
-        // 检查是否超过重置窗口
-        if (now - data.firstAttempt > LOGIN_LIMIT_CONFIG.ATTEMPT_WINDOW) {
-            // 重置计数
-            await context.env.LOGIN_ATTEMPTS.delete(key);
-            return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
-        } else {
-            // 设置封禁
-            const bannedUntil = now + LOGIN_LIMIT_CONFIG.BAN_DURATION;
-            await context.env.LOGIN_ATTEMPTS.put(key, JSON.stringify({
-                ...data,
-                bannedUntil
-            }), { expirationTtl: LOGIN_LIMIT_CONFIG.BAN_DURATION + 3600 });
-
-            return {
-                allowed: false,
-                banned: true,
-                remainingBanTime: LOGIN_LIMIT_CONFIG.BAN_DURATION,
-                message: `登录尝试次数过多，账户已被锁定 ${LOGIN_LIMIT_CONFIG.BAN_DURATION / 60} 分钟`
-            };
-        }
-    }
-
-    return {
-        allowed: true,
-        remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS - data.attempts
-    };
-}
-
-// 记录登录失败
-async function recordLoginFailure(context, username, clientIP) {
-    if (!context.env.LOGIN_ATTEMPTS) {
-        return;
-    }
-
-    const key = `login_limit:${username}:${clientIP}`;
-    const limitData = await context.env.LOGIN_ATTEMPTS.get(key);
-    const now = Math.floor(Date.now() / 1000);
-
-    let data;
-    if (limitData) {
-        data = JSON.parse(limitData);
-        // 如果超过重置窗口，重新开始计数
-        if (now - data.firstAttempt > LOGIN_LIMIT_CONFIG.ATTEMPT_WINDOW) {
-            data = { attempts: 1, firstAttempt: now, lastAttempt: now };
-        } else {
-            data.attempts += 1;
-            data.lastAttempt = now;
-        }
-    } else {
-        data = { attempts: 1, firstAttempt: now, lastAttempt: now };
-    }
-
-    // 设置过期时间为封禁时长 + 1小时的缓冲
-    const ttl = LOGIN_LIMIT_CONFIG.BAN_DURATION + 3600;
-    await context.env.LOGIN_ATTEMPTS.put(key, JSON.stringify(data), { expirationTtl: ttl });
-}
-
-// 清除登录限制记录（登录成功时调用）
-async function clearLoginLimit(context, username, clientIP) {
-    if (!context.env.LOGIN_ATTEMPTS) {
-        return;
-    }
-
-    const key = `login_limit:${username}:${clientIP}`;
-    await context.env.LOGIN_ATTEMPTS.delete(key);
-}
+// 限流计数已抽到 utils/login-limit.ts（与 getRequestUser 共用，见 F2）。
+import { getClientIP, checkAuthLimit, recordAuthFailure, clearAuthLimit } from "@/utils/login-limit";
 
 export async function onRequestPost(context) {
     try {
@@ -168,7 +47,7 @@ export async function onRequestPost(context) {
         let username = account.split(':')[0];
 
         // 检查登录限制
-        const limitCheck = await checkLoginLimit(context, username, clientIP);
+        const limitCheck = await checkAuthLimit(context.env, username, clientIP);
         if (!limitCheck.allowed) {
             return new Response(JSON.stringify({
                 success: false,
@@ -188,10 +67,10 @@ export async function onRequestPost(context) {
 
         // 如果都不存在，记录失败并返回错误
         if(!permissions) {
-            await recordLoginFailure(context, username, clientIP);
+            await recordAuthFailure(context.env, username, clientIP);
 
             // 重新检查限制状态
-            const updatedLimitCheck = await checkLoginLimit(context, username, clientIP);
+            const updatedLimitCheck = await checkAuthLimit(context.env, username, clientIP);
             // L3：失败消息不再透露剩余尝试次数（攻击者可用它判断账号是否存在 /
             // 探测限流状态）；只在已触发锁定时告知锁定。
             let message = "用户名或密码错误";
@@ -210,7 +89,7 @@ export async function onRequestPost(context) {
         }
 
         // 登录成功，清除限制记录
-        await clearLoginLimit(context, username, clientIP);
+        await clearAuthLimit(context.env, username, clientIP);
 
         return new Response(JSON.stringify({
             success: true,

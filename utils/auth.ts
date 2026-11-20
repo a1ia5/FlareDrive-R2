@@ -1,4 +1,5 @@
 import { verifyD1Credentials, hasD1 } from "./d1auth";
+import { getClientIP, checkAuthLimit, recordAuthFailure } from "./login-limit";
 
 // ---------------------------------------------------------------------------
 // 权限模型（所有接口共用这一套，不要在各个接口里再各写一份）
@@ -174,6 +175,12 @@ export async function resolveAccount(account: string, context): Promise<UserInfo
 
 // 从请求的 Authorization: Basic 头解析出已通过校验的账户；没有或无效时返回 null。
 // 同一个请求内多次调用只校验一次。
+// F2：所有走 Basic 认证的接口都经过这里，所以限流也在这里执行——
+// 校验前先查该账号/IP 是否被封禁（被封禁直接返回 null，不做 PBKDF2，
+// 攻击者也无法从 401 区分"密码错"和"已被封禁"）；校验失败记一次数。
+// 注意：这里只记失败、不清零（成功清零只在登录接口做，见 login.ts；
+// 失败记录靠 KV 的 TTL 自然过期）。被封禁时在 context 上打标记，供
+// 需要返回 429 的调用方区分（多数接口直接按未登录返回 401 即可）。
 export async function getRequestUser(context): Promise<UserInfo | null> {
     if (context.__fdUser !== undefined) return context.__fdUser;
 
@@ -194,8 +201,19 @@ export async function getRequestUser(context): Promise<UserInfo | null> {
             account = "";
         }
         if (account) {
-            const info = await resolveAccount(account, context);
-            if (info.exists) user = info;
+            const username = account.split(":")[0];
+            const clientIP = getClientIP(context.request);
+            const limit = await checkAuthLimit(context.env, username, clientIP);
+            if (!limit.allowed) {
+                context.__fdAuthBanned = true;
+            } else {
+                const info = await resolveAccount(account, context);
+                if (info.exists) {
+                    user = info;
+                } else {
+                    await recordAuthFailure(context.env, username, clientIP);
+                }
+            }
         }
     }
 

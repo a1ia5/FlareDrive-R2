@@ -118,7 +118,12 @@ export async function onRequest(context) {
   // ---- 列出分享 ----
   if (method === "GET" && segments.length === 0) {
     const all = await listShares(bucket);
-    const visible = user.isAdmin ? all : all.filter((s) => s.createdBy === user.username);
+    // F4：管理员原来能看到全部分享（含可用链接），等于绕过了"管理员没有
+    // 文件越权"——管理员只能看到自己能读的目录下的分享（自己创建的也一样，
+    // 读不到的文件其分享链接对管理员同样不可用）。
+    const visible = user.isAdmin
+      ? all.filter((s) => userCanRead(user, context.env, s.key))
+      : all.filter((s) => s.createdBy === user.username);
     visible.sort((a, b) => b.createdAt - a.createdAt);
     return json({
       shares: visible.map((s) => ({
