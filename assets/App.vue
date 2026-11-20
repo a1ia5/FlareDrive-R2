@@ -2423,7 +2423,7 @@ export default {
     // 剪贴板内容显示文本（个数或文件名）
     clipboardLabel() {
       if (!this.clipboard) return '';
-      return Array.isArray(this.clipboard) ? `${this.clipboard.length} 个文件` : this.clipboard.split('/').pop();
+      return Array.isArray(this.clipboard) ? `${this.clipboard.length} 个文件` : this.displayNameForKey(this.clipboard);
     },
 
     // 该 key 是否在剪切集合里（用于置灰显示）
