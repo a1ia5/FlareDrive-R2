@@ -7,10 +7,13 @@
   >
     <div v-if="uploadProgress !== null" style="position: fixed; top: 0; left: 0; right: 0; z-index: 9999; background: rgba(255,255,255,0.95); padding: 6px 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);">
       <div style="display: flex; align-items: center; gap: 10px;">
-        <progress :value="uploadProgress" max="100" style="flex: 1;"></progress>
         <span v-if="uploadFileName" v-text="uploadFileName" style="font-size: 13px; color: #555; max-width: 40%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></span>
         <span v-text="Math.round(uploadProgress) + '%'" style="font-size: 13px; color: #555;"></span>
       </div>
+    </div>
+    <!-- 底部进度条：div 重做（不用原生 <progress>），left/right 双向定宽保证贴边 -->
+    <div v-if="uploadProgress !== null" class="bottom-progress-bar">
+      <div class="bottom-progress-fill" :style="{ width: Math.min(100, Math.max(0, uploadProgress)) + '%' }"></div>
     </div>
     <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder" @fetchUrl="fetchFromUrl"></UploadPopup>
 
@@ -3350,6 +3353,24 @@ export default {
 /* 剪切中的文件/文件夹：置灰，提示“待移动”；粘贴或取消后恢复 */
 .cut-file {
   opacity: 0.45;
+}
+
+/* 底部进度条：固定在视口底部，left/right 双向定宽（不用 width:100%，不受包含块宽度影响）；
+   div 画轨道和填充，不用原生 <progress>，左右贴边在各浏览器一致。 */
+.bottom-progress-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: rgba(0, 0, 0, 0.08);
+  z-index: 9999;
+  pointer-events: none;
+}
+.bottom-progress-fill {
+  height: 100%;
+  background: #007bff;
+  transition: width 0.2s ease;
 }
 
 .main {
