@@ -1549,9 +1549,16 @@ export default {
         const folderName = await this.showInputPrompt("创建文件夹", "请输入文件夹名称");
         if (!folderName) return;
         this.showUploadPopup = false;
-        const uploadUrl = `/api/write/items/${apiPath(this.cwd + folderName + '/_$folder$')}`;
+        // 撞名自动改名（与粘贴一致）：以当前文件夹列表为准
+        const usedNames = new Set();
+        for (const d of this.folders) usedNames.add(d.replace(/\/$/, '').split('/').pop() + '/');
+        const resolved = this.resolveAutoName(folderName, true, usedNames);
+        const uploadUrl = `/api/write/items/${apiPath(this.cwd + resolved.name + '/_$folder$')}`;
         await axios.put(uploadUrl, "");
         this.fetchFiles();
+        if (resolved.renamed) {
+          this.showCustomToast(`文件夹已存在，已自动改名为 "${resolved.name}"`, 'warning');
+        }
       } catch (error) {
         if (error === null) return; // 用户取消
         this.showCustomToast('创建文件夹失败: ' + (error.message || '未知错误'), 'error');
@@ -2832,10 +2839,12 @@ export default {
       }
 
       /** @type File **/
-      const { basedir, file } = this.uploadQueue.pop(0);
+      const { basedir, file, targetName } = this.uploadQueue.pop(0);
+      // 上传用的实际文件名（撞名时已在入队时自动改名；无 targetName 时回退到原名）
+      const uploadName = targetName || file.name;
       let thumbnailDigest = null;
       // 进度条按当前文件显示（M8）：每换一个文件重置百分比并显示文件名
-      this.uploadFileName = file.name;
+      this.uploadFileName = uploadName;
       this.uploadProgress = 0;
 
       if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
@@ -2857,7 +2866,7 @@ export default {
       }
 
       try {
-        const uploadUrl = `/api/write/items/${apiPath(basedir + file.name)}`;
+        const uploadUrl = `/api/write/items/${apiPath(basedir + uploadName)}`;
         const headers = {};
         const onUploadProgress = (progressEvent) => {
           var percentCompleted =
@@ -2866,7 +2875,7 @@ export default {
         };
         if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
         if (file.size >= SIZE_LIMIT) {
-          await multipartUpload(`${basedir}${file.name}`, file, {
+          await multipartUpload(`${basedir}${uploadName}`, file, {
             headers,
             onUploadProgress,
           });
@@ -2876,8 +2885,8 @@ export default {
       } catch (error) {
         // M8：上传失败要明确告诉用户是哪个文件、为什么失败（以前只写 console）
         const reason = error.response?.data?.error || error.message || '未知错误';
-        this.showCustomToast(`上传失败："${file.name}"（${reason}）`, 'error');
-        console.log(`Upload ${file.name} failed`, error);
+        this.showCustomToast(`上传失败："${uploadName}"（${reason}）`, 'error');
+        console.log(`Upload ${uploadName} failed`, error);
       }
       setTimeout(this.processUploadQueue);
     },
@@ -3185,11 +3194,29 @@ export default {
     uploadFiles(files) {
       if (this.cwd && !this.cwd.endsWith("/")) this.cwd += "/";
 
-      const uploadTasks = Array.from(files).map((file) => ({
-        basedir: this.cwd,
-        file,
-      }));
+      // 撞名自动改名（与粘贴一致）：以当前文件列表 + 待传队列为准，
+      // 既防同批重名，也防两批快速连续上传互相覆盖；列表过期时可能漏判（与粘贴同）。
+      const usedNames = new Set();
+      for (const f of this.files) usedNames.add(f.key.split('/').pop());
+      for (const t of this.uploadQueue) {
+        if (t.basedir === this.cwd) usedNames.add(t.targetName || t.file.name);
+      }
+      const renamed = [];
+      const uploadTasks = Array.from(files).map((file) => {
+        const resolved = this.resolveAutoName(file.name, false, usedNames);
+        if (resolved.renamed) renamed.push(`${file.name} → ${resolved.name}`);
+        return {
+          basedir: this.cwd,
+          file,
+          targetName: resolved.name,
+        };
+      });
       this.uploadQueue.push(...uploadTasks);
+      if (renamed.length) {
+        const shown = renamed.slice(0, 3).join('；');
+        const more = renamed.length > 3 ? ` 等 ${renamed.length} 个` : '';
+        this.showCustomToast(`以下文件因重名已自动改名：${shown}${more}`, 'warning');
+      }
       setTimeout(() => this.processUploadQueue());
     },
 
