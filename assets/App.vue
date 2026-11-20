@@ -5,15 +5,15 @@
       @drop.prevent="onDrop"
       :style="{ backgroundImage: `url('${backgroundImageUrl}')` }"
   >
-    <div v-if="uploadProgress !== null" style="position: fixed; top: 0; left: 0; right: 0; z-index: 9999; background: rgba(255,255,255,0.95); padding: 6px 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);">
-      <div style="display: flex; align-items: center; gap: 10px;">
-        <span v-if="uploadFileName" v-text="uploadFileName" style="font-size: 13px; color: #555; max-width: 40%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></span>
-        <span v-text="Math.round(uploadProgress) + '%'" style="font-size: 13px; color: #555;"></span>
+    <!-- 底部进度条（含文件名/状态文字和百分比，原顶栏已移除） -->
+    <div v-if="uploadProgress !== null" class="bottom-progress-wrap">
+      <div class="bottom-progress-info">
+        <span v-if="uploadFileName" v-text="uploadFileName" class="bottom-progress-name"></span>
+        <span v-text="Math.round(uploadProgress) + '%'" class="bottom-progress-pct"></span>
       </div>
-    </div>
-    <!-- 底部进度条：div 重做（不用原生 <progress>），left/right 双向定宽保证贴边 -->
-    <div v-if="uploadProgress !== null" class="bottom-progress-bar">
-      <div class="bottom-progress-fill" :style="{ width: Math.min(100, Math.max(0, uploadProgress)) + '%' }"></div>
+      <div class="bottom-progress-bar">
+        <div class="bottom-progress-fill" :style="{ width: Math.min(100, Math.max(0, uploadProgress)) + '%' }"></div>
+      </div>
     </div>
     <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder" @fetchUrl="fetchFromUrl"></UploadPopup>
 
@@ -2839,7 +2839,7 @@ export default {
       }
 
       /** @type File **/
-      const { basedir, file, targetName } = this.uploadQueue.pop(0);
+      const { basedir, file, targetName } = this.uploadQueue.shift();
       // 上传用的实际文件名（撞名时已在入队时自动改名；无 targetName 时回退到原名）
       const uploadName = targetName || file.name;
       let thumbnailDigest = null;
@@ -3382,17 +3382,40 @@ export default {
   opacity: 0.45;
 }
 
-/* 底部进度条：固定在视口底部，left/right 双向定宽（不用 width:100%，不受包含块宽度影响）；
-   div 画轨道和填充，不用原生 <progress>，左右贴边在各浏览器一致。 */
-.bottom-progress-bar {
+/* 底部进度条：文件名/状态文字 + 百分比在上，进度条在下，整体固定在视口底部；
+   外层 left/right 双向定宽（不用 width:100%），div 画轨道和填充，不用原生 <progress>，
+   左右贴边在各浏览器一致。 */
+.bottom-progress-wrap {
   position: fixed;
   left: 0;
   right: 0;
   bottom: 0;
-  height: 4px;
-  background: rgba(0, 0, 0, 0.08);
   z-index: 9999;
   pointer-events: none;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.1);
+}
+.bottom-progress-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: #555;
+}
+.bottom-progress-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bottom-progress-pct {
+  flex-shrink: 0;
+}
+.bottom-progress-bar {
+  height: 4px;
+  background: rgba(0, 0, 0, 0.08);
 }
 .bottom-progress-fill {
   height: 100%;
