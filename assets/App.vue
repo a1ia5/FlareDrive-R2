@@ -186,7 +186,7 @@
             { text: '按照名称排序A-Z' },
             { text: '按照大小递增排序' },
             { text: '按照大小递减排序' },
-            { text: '粘贴文件到此目录', disabled: !clipboard || !canWrite },
+            { text: '粘贴文件到此目录', disabled: !clipboard || !canWrite || !canWriteHere },
             { text: '管理分享链接', disabled: !isLoggedIn || isReadOnlyUser }
           ]"
           @click="onMenuClick" />
@@ -247,7 +247,7 @@
             </svg>
             复制
           </button>
-          <button v-if="canWrite" @click="batchMove" class="toolbar-btn">
+          <button v-if="canWrite" @click="batchCut" class="toolbar-btn">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
               <polyline points="14,2 14,8 20,8"/>
@@ -255,7 +255,7 @@
               <line x1="16" y1="17" x2="8" y2="17"/>
               <line x1="10" y1="9" x2="8" y2="9"/>
             </svg>
-            移动
+            剪切
           </button>
           <button v-if="canWrite" @click="batchDelete" class="toolbar-btn danger">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -305,7 +305,7 @@
           </div>
         </li>
         <li v-for="folder in filteredFolders" :key="folder">
-          <div tabindex="0" class="file-item" @click="cwd = folder" @contextmenu.prevent="
+          <div tabindex="0" class="file-item" :class="{ 'cut-file': isCutFile(folder + '_$folder$') }" @click="cwd = folder" @contextmenu.prevent="
             showContextMenu = true;
           focusedItem = folder;
           ">
@@ -363,7 +363,7 @@
             @contextmenu.prevent="showContextMenu = true; focusedItem = file;"
             class="file-item"
             style="position: relative;"
-            :class="{ 'selected': isFileSelected(file.key) }"
+            :class="{ 'selected': isFileSelected(file.key), 'cut-file': isCutFile(file.key) }"
           >
             <!-- 多选复选框 -->
             <div v-if="isMultiSelectMode" class="file-checkbox" @click.stop="toggleFileSelection(file.key)">
@@ -426,9 +426,14 @@
             <span>复制目录链接</span>
           </button>
         </li>
+        <li>
+          <button @click="copyFile(focusedItem + '_$folder$')" :disabled="isGuest || isReadOnlyUser">
+            <span>复制</span>
+          </button>
+        </li>
         <li v-if="canWrite">
-          <button @click="moveFile(focusedItem + '_$folder$')">
-            <span>移动</span>
+          <button @click="cutFile(focusedItem + '_$folder$')">
+            <span>剪切</span>
           </button>
         </li>
         <li v-if="clipboard && canWrite">
@@ -459,8 +464,8 @@
           </button>
         </li>
         <li v-if="canWrite">
-          <button @click="moveFile(focusedItem.key)">
-            <span>移动</span>
+          <button @click="cutFile(focusedItem.key)">
+            <span>剪切</span>
           </button>
         </li>
         <li>
@@ -512,32 +517,6 @@
         <div style="display: flex; gap: 10px; justify-content: flex-end;">
           <button @click="cancelInput" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px;">取消</button>
           <button @click="confirmInput" style="padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px;">确定</button>
-        </div>
-      </div>
-    </Dialog>
-
-    <!-- 目录选择对话框 -->
-    <Dialog v-model="showFolderDialog">
-      <div style="padding: 20px;">
-        <h3 v-text="folderDialog.title" style="margin: 0 0 15px 0;"></h3>
-        <div style="max-height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 15px;">
-          <div
-            v-for="(folder, index) in folderDialog.folders"
-            :key="index"
-            @click="selectFolder(folder)"
-            :class="{ 'selected': folderDialog.selectedFolder === folder.value }"
-            style="padding: 10px; cursor: pointer; border-bottom: 1px solid #eee;"
-            :style="{
-              backgroundColor: folderDialog.selectedFolder === folder.value ? '#e3f2fd' : 'transparent',
-              fontWeight: folderDialog.selectedFolder === folder.value ? 'bold' : 'normal'
-            }"
-          >
-            <span v-text="folder.display"></span>
-          </div>
-        </div>
-        <div style="display: flex; gap: 10px; justify-content: flex-end;">
-          <button @click="cancelFolderSelection" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px;">取消</button>
-          <button @click="confirmFolderSelection" :disabled="!folderDialog.selectedFolder" style="padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; opacity: folderDialog.selectedFolder ? 1 : 0.5;">确定</button>
         </div>
       </div>
     </Dialog>
@@ -672,7 +651,7 @@
 
     <!-- 桌面端浮动粘贴按钮 -->
     <div
-      v-if="clipboard && canWrite && !isMobile"
+      v-if="clipboard && canWrite && canWriteHere && !isMobile"
       class="floating-paste-button desktop"
       :class="{ 'auto-hide': !isNearPasteButton }"
       :style="{ left: pasteButtonPosition.x + 'px', top: pasteButtonPosition.y + 'px' }"
@@ -686,17 +665,17 @@
           <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
           <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
         </svg>
-        <span>粘贴</span>
+        <span>{{ clipboardIsCut ? '粘贴（移动）' : '粘贴' }}</span>
         <kbd class="shortcut-hint">Ctrl+V</kbd>
       </div>
       <div class="paste-file-info">
-        {{ Array.isArray(clipboard) ? `${clipboard.length} 个文件` : clipboard.split('/').pop() }}
+        {{ clipboardLabel() }}
       </div>
     </div>
 
     <!-- 移动端底部粘贴工具栏 -->
     <div
-      v-if="clipboard && isMobile"
+      v-if="clipboard && canWrite && canWriteHere && isMobile"
       class="mobile-paste-toolbar"
     >
       <div class="paste-toolbar-content" @click="handlePasteButtonClick">
@@ -706,10 +685,10 @@
             <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
           </svg>
           <span class="paste-text">
-            粘贴 {{ Array.isArray(clipboard) ? `${clipboard.length} 个文件` : clipboard.split('/').pop() }}
+            {{ clipboardIsCut ? '移动' : '粘贴' }} {{ clipboardLabel() }}
           </span>
         </div>
-        <button class="paste-close-btn" @click.stop="clipboard = null">
+        <button class="paste-close-btn" @click.stop="clearClipboard">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18"/>
             <line x1="6" y1="6" x2="18" y2="18"/>
@@ -835,6 +814,8 @@ export default {
     files: [],
     folders: [],
     clipboard: null,
+    clipboardIsCut: false, // 剪贴板内容是否为剪切（粘贴后移动源文件）；复制时为 false
+    canWriteHere: true, // 当前目录是否有写权限（导航时调接口查；默认 true，查完再纠正）
     focusedItem: null,
     loading: false,
     order: null,
@@ -886,14 +867,6 @@ export default {
       title: '',
       placeholder: '',
       value: '',
-      resolve: null,
-      reject: null
-    },
-    showFolderDialog: false,
-    folderDialog: {
-      title: '',
-      folders: [],
-      selectedFolder: null,
       resolve: null,
       reject: null
     },
@@ -1440,7 +1413,23 @@ export default {
         return;
       }
       this.clipboard = fileKey;
-      this.showCustomToast('文件已复制到剪贴板', 'success');
+      this.clipboardIsCut = false;
+      this.showCustomToast('已复制到剪贴板', 'success');
+      // 关闭右键菜单
+      this.showContextMenu = false;
+    },
+
+    // 剪切：把 key（文件或文件夹标记，如 openclaw/Wechat/_$folder$）放进剪贴板，
+    // 粘贴时移动（先复制后删除）；文件夹只能单选剪切（文件夹不可多选）
+    cutFile(fileKey) {
+      if (this.isGuest || this.isReadOnlyUser) {
+        this.showCustomToast(this.isReadOnlyUser ? '只读用户无法剪切文件' : '请先登录', 'error');
+        this.showContextMenu = false;
+        return;
+      }
+      this.clipboard = fileKey;
+      this.clipboardIsCut = true;
+      this.showCustomToast('已剪切，粘贴后将移动到目标目录（按 ESC 取消）', 'success');
       // 关闭右键菜单
       this.showContextMenu = false;
     },
@@ -1572,6 +1561,8 @@ export default {
       this.files = [];
       this.folders = [];
       this.loading = true;
+      // 导航/刷新时查当前目录的写权限，决定是否显示粘贴按钮（B5；不阻塞列表加载）
+      this.refreshWritePermission();
       this.needLogin = false;
       this.listTruncated = false;
 
@@ -2028,76 +2019,22 @@ export default {
 
       // 复制操作不需要写权限，只是复制到剪贴板
       this.clipboard = this.selectedFiles.length === 1 ? this.selectedFiles[0] : this.selectedFiles;
+      this.clipboardIsCut = false;
       this.showCustomToast(`已复制 ${this.selectedFiles.length} 个文件到剪贴板`, 'success');
     },
 
-    async batchMove() {
+    // 批量剪切：把选中的文件放进剪贴板，粘贴时移动（先复制后删除）
+    batchCut() {
       if (this.selectedFiles.length === 0) return;
 
-      // 检查写权限
-      if (!this.canWrite) {
-        this.showPermissionDialog('移动文件');
+      if (this.isGuest || this.isReadOnlyUser) {
+        this.showCustomToast(this.isReadOnlyUser ? '只读用户无法剪切文件' : '请先登录', 'error');
         return;
       }
 
-      try {
-        console.log('🚀 开始批量移动文件:', this.selectedFiles);
-
-        // 获取可访问的目录列表
-        const accessibleFolders = await this.getAccessibleFolders();
-
-        if (accessibleFolders.length === 0) {
-          this.showCustomToast('没有可用的目标目录，您可能没有足够的权限', 'error');
-          return;
-        }
-
-        // 显示目录选择对话框
-        const targetPath = await this.showFolderSelector(
-          `移动 ${this.selectedFiles.length} 个文件`,
-          accessibleFolders.map(folder => ({
-            value: folder.path,
-            display: folder.displayName
-          }))
-        );
-
-        if (targetPath === null) return; // 用户取消
-
-        // 批量移动文件
-        let successCount = 0;
-        let failCount = 0;
-
-        for (const sourceFile of this.selectedFiles) {
-          try {
-            const fileName = sourceFile.split('/').pop();
-            const targetFile = targetPath === '' ? fileName : `${targetPath}${fileName}`;
-
-            await this.copyPaste(sourceFile, targetFile);
-            await this.deleteFile(sourceFile);
-            successCount++;
-          } catch (error) {
-            console.error(`移动文件 ${sourceFile} 失败:`, error);
-            failCount++;
-          }
-        }
-
-        // 清空选择并刷新文件列表
-        this.selectedFiles = [];
-        this.fetchFiles();
-
-        if (failCount === 0) {
-          this.showCustomToast(`成功移动 ${successCount} 个文件`, 'success');
-        } else {
-          this.showCustomToast(`移动完成：成功 ${successCount} 个，失败 ${failCount} 个`, 'warning');
-        }
-
-      } catch (error) {
-        console.error('批量移动失败:', error);
-        if (error.isAuthError) {
-          this.showPermissionDialog('移动文件');
-        } else {
-          this.showCustomToast('批量移动失败: ' + (error.message || '未知错误'), 'error');
-        }
-      }
+      this.clipboard = this.selectedFiles.length === 1 ? this.selectedFiles[0] : this.selectedFiles;
+      this.clipboardIsCut = true;
+      this.showCustomToast(`已剪切 ${this.selectedFiles.length} 个文件，粘贴后将移动（按 ESC 取消）`, 'success');
     },
 
     async batchDelete() {
@@ -2170,7 +2107,14 @@ export default {
         return;
       }
 
-      // Escape：先关闭打开的菜单/右键菜单/上传弹窗，再退出多选模式（D4）
+      // Ctrl+X 或 Cmd+X：剪切选中的文件（仅多选模式；单文件剪切走右键菜单）
+      if ((event.ctrlKey || event.metaKey) && event.key === 'x' && !event.target.matches('input, textarea') && this.selectedFiles.length > 0) {
+        event.preventDefault();
+        this.batchCut();
+        return;
+      }
+
+      // Escape：先关闭打开的菜单/右键菜单/上传弹窗，再取消剪贴板，最后退出多选模式（D4）
       if (event.key === 'Escape') {
         if (this.showMenu) {
           this.showMenu = false;
@@ -2196,6 +2140,11 @@ export default {
           this.showFetchDialog = false;
           return;
         }
+        if (this.clipboard) {
+          // 先取消剪贴板（剪切/复制待粘贴状态），并退出多选模式
+          this.clearClipboard();
+          return;
+        }
         if (this.isMultiSelectMode) {
           this.isMultiSelectMode = false;
           this.selectedFiles = [];
@@ -2209,60 +2158,6 @@ export default {
         this.batchDelete();
         return;
       }
-    },
-
-    // 自定义文件夹选择对话框
-    showFolderSelector(title, folders) {
-      console.log('📂 showFolderSelector 被调用:', { title, folders });
-      return new Promise((resolve, reject) => {
-        console.log('📂 创建 Promise，设置对话框状态');
-        this.folderDialog = {
-          title,
-          folders,
-          selectedFolder: null,
-          resolve: (value) => {
-            console.log('📂 对话框 resolve 被调用:', value);
-            resolve(value);
-          },
-          reject: (error) => {
-            console.log('📂 对话框 reject 被调用:', error);
-            reject(error);
-          }
-        };
-        this.showFolderDialog = true;
-        console.log('📂 对话框显示状态设置为 true');
-      });
-    },
-
-    selectFolder(folder) {
-      console.log('📂 selectFolder 被调用:', folder);
-      this.folderDialog.selectedFolder = folder.value;
-      console.log('📂 选中的文件夹:', this.folderDialog.selectedFolder);
-    },
-
-    confirmFolderSelection() {
-      console.log('📂 confirmFolderSelection 被调用');
-      console.log('📂 当前选中的文件夹:', this.folderDialog.selectedFolder);
-      console.log('📂 resolve 函数存在:', !!this.folderDialog.resolve);
-
-      if (this.folderDialog.resolve && this.folderDialog.selectedFolder !== null) {
-        console.log('📂 调用 resolve，返回值:', this.folderDialog.selectedFolder);
-        this.folderDialog.resolve(this.folderDialog.selectedFolder);
-      } else {
-        console.log('📂 无法调用 resolve - 条件不满足');
-      }
-      this.showFolderDialog = false;
-      console.log('📂 对话框已关闭');
-    },
-
-    cancelFolderSelection() {
-      console.log('📂 cancelFolderSelection 被调用');
-      if (this.folderDialog.reject) {
-        console.log('📂 调用 reject');
-        this.folderDialog.reject(null);
-      }
-      this.showFolderDialog = false;
-      console.log('📂 对话框已取消并关闭');
     },
 
     // 初始化粘贴按钮位置
@@ -2523,61 +2418,360 @@ export default {
       this.previewInitialIndex = 0;
     },
 
+    // —— 剪贴板辅助 ——
+
+    // 剪贴板内容显示文本（个数或文件名）
+    clipboardLabel() {
+      if (!this.clipboard) return '';
+      return Array.isArray(this.clipboard) ? `${this.clipboard.length} 个文件` : this.clipboard.split('/').pop();
+    },
+
+    // 该 key 是否在剪切集合里（用于置灰显示）
+    isCutFile(key) {
+      if (!this.clipboardIsCut || !this.clipboard) return false;
+      return Array.isArray(this.clipboard) ? this.clipboard.includes(key) : this.clipboard === key;
+    },
+
+    // 清空剪贴板（取消剪切/复制），并退出多选模式（A7/A8）
+    clearClipboard() {
+      this.clipboard = null;
+      this.clipboardIsCut = false;
+      if (this.isMultiSelectMode) {
+        this.isMultiSelectMode = false;
+        this.selectedFiles = [];
+      }
+    },
+
+    // 检查指定目录的写权限（B5：导航时查，粘贴按钮与 pasteFile 以此为准）
+    async checkWritePermission(path) {
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        const savedCredentials = localStorage.getItem('authCredentials');
+        if (savedCredentials) {
+          headers['Authorization'] = `Basic ${savedCredentials}`;
+        }
+        const response = await fetch('/api/auth/check-write-permission', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ path })
+        });
+        const result = await response.json();
+        return !!result.hasPermission;
+      } catch (error) {
+        console.error('检查写权限失败:', error);
+        return false;
+      }
+    },
+
+    // 刷新当前目录的写权限（导航/刷新时调用；不阻塞列表加载；
+    // 若导航已换目录，过期结果直接丢弃）
+    async refreshWritePermission() {
+      const path = this.cwd;
+      const ok = await this.checkWritePermission(path);
+      if (this.cwd === path) {
+        this.canWriteHere = ok;
+      }
+    },
+
+    // —— 剪切/粘贴辅助 ——
+
+    // 取 key 的显示名：文件为文件名，文件夹标记为文件夹名
+    displayNameForKey(key) {
+      if (key.endsWith('_$folder$')) {
+        return key.slice(0, -9).split('/').filter(Boolean).pop() || key;
+      }
+      return key.split('/').pop();
+    },
+
+    // 取 key 所在的目录（含尾部 /，根目录为 ''）
+    // 文件夹标记取其父目录（如 openclaw/Wechat/_$folder$ → openclaw/）
+    parentDirOfKey(key) {
+      const path = key.endsWith('_$folder$') ? key.slice(0, -9) : key;
+      const trimmed = path.replace(/\/$/, '');
+      const slash = trimmed.lastIndexOf('/');
+      return slash === -1 ? '' : trimmed.slice(0, slash + 1);
+    },
+
+    // 撞名自动改名（B4）：目标目录已有同名时，在名字后加 " (1)"、" (2)"… 直到不重名
+    // usedNames：目标目录已有名称集合（文件为名，文件夹为名+'/'），本次已分配的名字也会加进去
+    resolveAutoName(name, isFolder, usedNames) {
+      const key = isFolder ? name + '/' : name;
+      if (!usedNames.has(key)) {
+        usedNames.add(key);
+        return { name, renamed: false };
+      }
+      // 拆分文件名和扩展名（无扩展名、或以 . 开头的文件，整体视为名字）
+      let base = name, ext = '';
+      if (!isFolder) {
+        const dot = name.lastIndexOf('.');
+        if (dot > 0) {
+          base = name.slice(0, dot);
+          ext = name.slice(dot);
+        }
+      }
+      let i = 1;
+      for (;;) {
+        const candidate = isFolder ? `${base} (${i})` : `${base} (${i})${ext}`;
+        const candidateKey = isFolder ? candidate + '/' : candidate;
+        if (!usedNames.has(candidateKey)) {
+          usedNames.add(candidateKey);
+          return { name: candidate, renamed: true, original: name };
+        }
+        i++;
+      }
+    },
+
+    // 递归复制/移动一个文件夹（B3/B6）
+    // markerKey：源文件夹标记，如 openclaw/Wechat/_$folder$
+    // targetFolderPath：目标文件夹路径，含尾部 /，如 openclaw/目标/Wechat (1)/
+    // isMove：true=移动（复制后删源），false=复制
+    // 返回 { total, failed: [{ key, stage: 'copy'|'delete'|'marker', error }], authAborted }
+    // 标记策略（B6：不丢数据、可恢复）：
+    //   全部成功 → 移动时删源标记（文件夹真正搬走），复制时只写目标标记；
+    //   部分失败 → 目标标记照写（目标文件夹可见，已成功的内容在里面），
+    //              移动时保留源标记（源文件夹仍可见，失败的项还在里面，可重试）；
+    //   全部失败 → 不写目标标记（不留空文件夹），源标记保留。
+    // 注意：旧版 moveFile 的文件夹名取法有误（'_$folder$'.slice(0,-9) === ''），
+    // 会把文件夹内容摊平到目标目录；这里用 displayNameForKey 正确取名。
+    async transferFolder(markerKey, targetFolderPath, isMove) {
+      const sourceBasePath = markerKey.slice(0, -9); // 含尾部 /，如 openclaw/Wechat/
+      const allItems = await this.getAllItems(sourceBasePath);
+      const total = allItems.length;
+      const failed = [];
+      let authAborted = false;
+      let processed = 0;
+
+      this.uploadFileName = isMove ? '正在移动文件夹…' : '正在复制文件夹…';
+      if (total > 0) this.uploadProgress = 0;
+      try {
+        for (const item of allItems) {
+          const relativePath = item.key.substring(sourceBasePath.length);
+          const newPath = targetFolderPath + relativePath;
+          try {
+            await this.copyPaste(item.key, newPath);
+            if (isMove) {
+              try {
+                await this.deleteFile(item.key);
+              } catch (delError) {
+                // 复制成功但删除失败：文件两处都有，单独记一类，不算复制失败
+                failed.push({ key: item.key, stage: 'delete', error: delError });
+              }
+            }
+          } catch (error) {
+            if (error.isAuthError) {
+              authAborted = true;
+              break;
+            }
+            failed.push({ key: item.key, stage: 'copy', error });
+          }
+          processed++;
+          if (total > 0) this.uploadProgress = (processed / total) * 100;
+        }
+      } finally {
+        this.uploadProgress = null;
+        this.uploadFileName = '';
+      }
+
+      // 标记处理（见上 B6 策略）
+      const copyFailedCount = failed.filter(f => f.stage === 'copy' || f.stage === 'marker').length;
+      const succeededCount = total - copyFailedCount;
+      const targetMarkerKey = targetFolderPath + '_$folder$';
+      if (succeededCount > 0 && !authAborted) {
+        try {
+          await this.copyPaste(markerKey, targetMarkerKey);
+          if (isMove && copyFailedCount === 0) {
+            // 全部成功才删源标记；部分失败时保留源标记以便重试
+            await this.deleteFile(markerKey);
+          }
+        } catch (markerError) {
+          if (markerError.isAuthError) {
+            authAborted = true;
+          }
+          failed.push({ key: markerKey, stage: 'marker', error: markerError });
+        }
+      }
+      return { total, failed, authAborted };
+    },
+
     async pasteFile() {
       if (!this.clipboard) return;
 
-      // 检查写权限
-      if (!this.canWrite) {
+      // 写权限：以当前目录的查权限结果为准（导航时查过；后端仍会兜底报 401/403）
+      if (!this.canWrite || !this.canWriteHere) {
         this.showPermissionDialog('粘贴文件');
         return;
       }
 
       // 关闭右键菜单
       this.showContextMenu = false;
-      
+
+      const isCut = this.clipboardIsCut;
+      const verb = isCut ? '移动' : '粘贴';
+      const items = Array.isArray(this.clipboard) ? [...this.clipboard] : [this.clipboard];
+
       try {
-        // 检查是否是多文件粘贴
-        if (Array.isArray(this.clipboard)) {
-          // 多文件粘贴
-          const confirmed = await this.showConfirmPrompt(
-            '批量粘贴文件',
-            `确定要粘贴 ${this.clipboard.length} 个文件到当前目录吗？`,
-            { confirmText: '粘贴', cancelText: '取消' }
-          );
+        // 目标目录现有名称（粘贴目标就是当前目录；文件为名，文件夹为名+'/'）。
+        // 以当前列表为准：导航后 fetchFiles 已刷新；若列表过期，极少数情况下撞名可能漏判，
+        // 后端不校验撞名，仍会覆盖——不要在列表未加载完时粘贴。
+        const usedNames = new Set();
+        for (const f of this.files) usedNames.add(f.key.split('/').pop());
+        for (const d of this.folders) usedNames.add(d.replace(/\/$/, '').split('/').pop() + '/');
 
-          if (!confirmed) return;
-
-          let successCount = 0;
-          let failCount = 0;
-
-          for (const sourceFile of this.clipboard) {
-            try {
-              const fileName = sourceFile.split('/').pop();
-              const targetFile = `${this.cwd}${fileName}`;
-              await this.copyPaste(sourceFile, targetFile);
-              successCount++;
-            } catch (error) {
-              console.error(`粘贴文件 ${sourceFile} 失败:`, error);
-              failCount++;
+        // B1 同目录粘贴保护（仅剪切）：源目录 == 当前目录时粘贴等于没动，
+        // 且后续删除会把源文件删掉，必须跳过
+        // B2 文件夹移入自身/子孙保护：目标在文件夹内部时跳过
+        const skipped = [];
+        const todo = [];
+        for (const key of items) {
+          const name = this.displayNameForKey(key);
+          const isFolder = key.endsWith('_$folder$');
+          if (isCut && this.parentDirOfKey(key) === this.cwd) {
+            skipped.push({ name, reason: '已在当前目录' });
+            continue;
+          }
+          if (isFolder) {
+            const folderPath = key.slice(0, -9);
+            if (this.cwd === folderPath || this.cwd.startsWith(folderPath)) {
+              skipped.push({ name, reason: '不能移入自身或子目录' });
+              continue;
             }
           }
+          todo.push({ key, name, isFolder });
+        }
 
-          this.fetchFiles();
+        if (todo.length === 0) {
+          const msg = skipped.map(s => `${s.name}（${s.reason}）`).join('；');
+          this.showCustomToast(`无法${verb}：${msg}`, 'warning');
+          return;
+        }
 
-          if (failCount === 0) {
-            this.showCustomToast(`成功粘贴 ${successCount} 个文件`, 'success');
-          } else {
-            this.showCustomToast(`粘贴完成：成功 ${successCount} 个，失败 ${failCount} 个`, 'warning');
-          }
-        } else {
-          // 单文件粘贴
-          const defaultName = this.clipboard.split("/").pop();
-          let newName = await this.showInputPrompt("粘贴文件", "重命名为:", defaultName);
+        // 确认：多项时问一声；单项复制走改名输入框（保留原行为）；单项剪切不问
+        let singleCopyName = null;
+        if (todo.length > 1) {
+          const confirmed = await this.showConfirmPrompt(
+            isCut ? '批量移动文件' : '批量粘贴文件',
+            `确定要${verb} ${todo.length} 个文件到当前目录吗？`,
+            { confirmText: verb, cancelText: '取消' }
+          );
+          if (!confirmed) return;
+        } else if (!isCut) {
+          const defaultName = todo[0].name;
+          const newName = await this.showInputPrompt('粘贴文件', '重命名为:', defaultName);
           if (newName === null || newName === undefined) return;
-          if (newName === "") newName = defaultName;
-          await this.copyPaste(this.clipboard, `${this.cwd}${newName}`);
-          this.fetchFiles();
-          this.showCustomToast('文件粘贴成功', 'success');
+          singleCopyName = newName === '' ? defaultName : newName;
+        }
+
+        // 执行
+        let succeeded = 0;
+        const copyFailed = []; // { name }：复制失败（源文件还在原处）
+        const deleteFailed = []; // { name }：已复制但源文件未删除（两处都有）
+        const renamed = []; // { from, to }：撞名自动改名的项
+        const folderNotes = []; // 文件夹未完成时的说明
+        let authAborted = false;
+        const failedKeys = []; // 剪切部分失败时保留在剪贴板里以便重试（仅复制失败的项）
+
+        for (let i = 0; i < todo.length; i++) {
+          const item = todo[i];
+          // B4 撞名自动改名（目标名可能被前面已分配的名字占用，也一并处理）
+          const resolved = this.resolveAutoName(
+            item.isFolder ? item.name : (singleCopyName || item.name),
+            item.isFolder,
+            usedNames
+          );
+          if (resolved.renamed) renamed.push({ from: resolved.original, to: resolved.name });
+
+          if (item.isFolder) {
+            const targetFolderPath = `${this.cwd}${resolved.name}/`;
+            const result = await this.transferFolder(item.key, targetFolderPath, isCut);
+            if (result.authAborted) {
+              authAborted = true;
+              failedKeys.push(...todo.slice(i + 1).map(t => t.key));
+              break;
+            }
+            const itemCopyFailed = result.failed.filter(f => f.stage === 'copy' || f.stage === 'marker');
+            const itemDeleteFailed = result.failed.filter(f => f.stage === 'delete');
+            if (itemCopyFailed.length === 0) {
+              succeeded++;
+            } else {
+              copyFailed.push({ name: item.name });
+              failedKeys.push(item.key);
+              folderNotes.push(`${item.name} 未能完整${verb}：${itemCopyFailed.length} 个文件失败，源文件夹仍保留，可重试`);
+            }
+            for (const f of itemDeleteFailed) {
+              deleteFailed.push({ name: this.displayNameForKey(f.key) });
+            }
+          } else {
+            const targetFile = `${this.cwd}${resolved.name}`;
+            try {
+              await this.copyPaste(item.key, targetFile);
+              succeeded++;
+              if (isCut) {
+                try {
+                  await this.deleteFile(item.key);
+                } catch (delError) {
+                  if (delError.isAuthError) {
+                    authAborted = true;
+                    failedKeys.push(...todo.slice(i + 1).map(t => t.key));
+                    break;
+                  }
+                  // 复制成功但删除失败：文件两处都有，单独上报，不保留进剪贴板（重试会重复复制）
+                  deleteFailed.push({ name: item.name });
+                }
+              }
+            } catch (error) {
+              if (error.isAuthError) {
+                authAborted = true;
+                failedKeys.push(...todo.slice(i + 1).map(t => t.key));
+                break;
+              }
+              console.error(`${verb}文件 ${item.key} 失败:`, error);
+              copyFailed.push({ name: item.name });
+              failedKeys.push(item.key);
+            }
+          }
+        }
+
+        this.fetchFiles();
+
+        // 剪切是一次性的：全部成功则清空剪贴板；部分失败则只保留失败项以便重试
+        if (isCut) {
+          if (copyFailed.length === 0 && deleteFailed.length === 0 && !authAborted) {
+            this.clearClipboard();
+          } else if (failedKeys.length > 0) {
+            this.clipboard = failedKeys.length === 1 ? failedKeys[0] : failedKeys;
+            this.clipboardIsCut = true;
+          }
+        }
+
+        if (authAborted) {
+          this.showPermissionDialog(isCut ? '移动文件' : '粘贴文件');
+          this.showCustomToast(`权限不足，已停止${verb}：成功 ${succeeded} 个，失败 ${copyFailed.length} 个`, 'warning');
+          return;
+        }
+
+        // 结果汇总
+        const parts = [];
+        if (succeeded > 0) parts.push(`成功 ${succeeded} 个`);
+        if (copyFailed.length > 0) parts.push(`失败 ${copyFailed.length} 个`);
+        if (deleteFailed.length > 0) parts.push(`${deleteFailed.length} 个已复制但源文件未删除（两处都有）`);
+        let msg = `${verb}完成：${parts.join('，')}`;
+        if (renamed.length > 0) {
+          const list = renamed.slice(0, 3).map(r => `${r.from} → ${r.to}`).join('、');
+          msg += `；以下因重名已自动改名：${list}${renamed.length > 3 ? ` 等 ${renamed.length} 个` : ''}`;
+        }
+        if (skipped.length > 0) {
+          const list = skipped.slice(0, 3).map(s => `${s.name}（${s.reason}）`).join('、');
+          msg += `；已跳过：${list}${skipped.length > 3 ? ` 等 ${skipped.length} 个` : ''}`;
+        }
+        if (folderNotes.length > 0) {
+          msg += `；${folderNotes.join('；')}`;
+        }
+        if (copyFailed.length === 0 && deleteFailed.length === 0) {
+          this.showCustomToast(msg, 'success');
+        } else if (succeeded === 0) {
+          this.showCustomToast(msg, 'error', 5000);
+        } else {
+          this.showCustomToast(msg, 'warning', 5000);
         }
       } catch (error) {
         if (error === null || error === false) return; // 用户取消
@@ -2932,326 +3126,7 @@ export default {
       }
     },
 
-    async moveFile(key) {
-      // 检查写权限
-      if (!this.canWrite) {
-        this.showPermissionDialog('移动文件');
-        return;
-      }
-
-      // 关闭右键菜单
-      this.showContextMenu = false;
-
-      let targetPath = null; // 声明在外层作用域，以便错误处理时使用
-
-      console.log('🚀 开始移动文件:', key);
-
-      try {
-        // 获取用户有权限的目录列表
-        console.log('📋 获取可访问目录列表...');
-        const accessibleFolders = await this.getAccessibleFolders();
-        console.log('📋 可访问目录:', accessibleFolders);
-
-        if (accessibleFolders.length === 0) {
-          console.log('❌ 没有可访问的目录');
-          this.showCustomToast('没有可用的目标目录，您可能没有足够的权限', 'error');
-          return;
-        }
-
-        // 构建选择列表
-        const folderOptions = accessibleFolders.map(folder => {
-          const displayName = folder.path === '' ? '根目录' :
-            folder.path === this.cwd ? '当前目录' :
-              folder.displayName;
-          return {
-            display: displayName,
-            value: folder.path
-          };
-        });
-        console.log('📋 目录选择列表:', folderOptions);
-
-        // 使用自定义文件夹选择器
-        console.log('📂 显示目录选择对话框...');
-        targetPath = await this.showFolderSelector('选择目标目录', folderOptions);
-        console.log('📂 用户选择的目标路径:', targetPath);
-        if (targetPath === null || targetPath === undefined) {
-          console.log('❌ 用户取消了操作');
-          return; // 用户取消
-        }
-
-        // 获取文件名
-        const fileName = key.split('/').pop();
-        // 如果是文件夹,需要移除_$folder$后缀
-        const finalFileName = fileName.endsWith('_$folder$') ? fileName.slice(0, -9) : fileName;
-        console.log('📄 文件信息:', { fileName, finalFileName, isFolder: key.endsWith('_$folder$') });
-
-        // 修复：正确处理目标路径，避免双斜杠
-        const normalizedPath = targetPath === '' ? '' : (targetPath.endsWith('/') ? targetPath : targetPath + '/');
-        console.log('📁 路径信息:', { targetPath, normalizedPath });
-
-        // 如果是目录（以_$folder$结尾），则需要移动整个目录内容
-        if (key.endsWith('_$folder$')) {
-          console.log('📁 检测到目录移动，开始处理目录内容...');
-          // 获取源目录的基础路径（移除_$folder$后缀）
-          const sourceBasePath = key.slice(0, -9);
-          // 获取目标目录的基础路径，修复根目录的情况
-          const targetBasePath = normalizedPath + finalFileName + '/';
-
-          // 递归获取所有子文件和子目录
-          const allItems = await this.getAllItems(sourceBasePath);
-
-          // 显示进度提示
-          const totalItems = allItems.length;
-          let processedItems = 0;
-          this.uploadFileName = '正在移动文件夹…';
-          if (totalItems > 0) this.uploadProgress = 0;
-
-          // 移动所有项目
-          for (const item of allItems) {
-            const relativePath = item.key.substring(sourceBasePath.length);
-            const newPath = targetBasePath + relativePath;
-
-            try {
-              // 复制到新位置
-              await this.copyPaste(item.key, newPath);
-              // 删除原位置
-              await this.deleteFile(item.key);
-
-              // 更新进度
-              processedItems++;
-              this.uploadProgress = (processedItems / totalItems) * 100;
-            } catch (itemError) {
-              console.error(`移动 ${item.key} 失败:`, itemError);
-              // 如果是权限错误，停止整个操作并抛出错误
-              if (itemError.isAuthError) {
-                throw itemError;
-              }
-              // 其他错误记录但继续处理其他文件
-            }
-          }
-
-          // 移动目录标记
-          const targetFolderPath = targetBasePath.slice(0, -1) + '_$folder$';
-          try {
-            await this.copyPaste(key, targetFolderPath);
-            await this.deleteFile(key);
-          } catch (folderError) {
-            // 如果是权限错误，重新抛出
-            if (folderError.isAuthError) {
-              throw folderError;
-            }
-            // 其他错误也抛出
-            const error = new Error(`移动目录标记失败: ${folderError.message || folderError}`);
-            error.originalError = folderError;
-            throw error;
-          }
-
-          // 清除进度
-          this.uploadProgress = null;
-          this.uploadFileName = '';
-        } else {
-          // 单文件移动逻辑，修复根目录的情况
-          const targetFilePath = normalizedPath + finalFileName;
-
-          console.log('🔍 移动文件调试信息:');
-          console.log('- 源文件:', key);
-          console.log('- 目标路径:', targetPath);
-          console.log('- 目标文件路径:', targetFilePath);
-          console.log('- 标准化路径:', normalizedPath);
-
-          try {
-            console.log('📤 开始复制文件...');
-            await this.copyPaste(key, targetFilePath);
-            console.log('✅ 复制成功，开始删除原文件...');
-            await this.deleteFile(key);
-            console.log('✅ 删除成功，移动完成');
-          } catch (moveError) {
-            console.error('❌ 移动过程中出错:', moveError);
-            console.log('- 错误类型:', typeof moveError);
-            console.log('- 是否权限错误:', moveError.isAuthError);
-            console.log('- 错误消息:', moveError.message);
-            console.log('- 完整错误对象:', moveError);
-
-            // 如果是权限错误，重新抛出以便外层catch处理
-            if (moveError.isAuthError) {
-              throw moveError;
-            }
-            // 其他错误也抛出，但添加更多上下文
-            const error = new Error(`移动文件失败: ${moveError.message || moveError}`);
-            error.originalError = moveError;
-            throw error;
-          }
-        }
-
-        // 刷新文件列表
-        this.fetchFiles();
-
-        // 显示成功提示
-        const targetDisplayName = targetPath === '' ? '根目录' :
-          targetPath.replace(/.*\/(?!$)|\//g, '') + '/';
-        const displayFileName = finalFileName; // 使用之前已经处理过的文件名
-        this.showCustomToast(`文件 "${displayFileName}" 已成功移动到 ${targetDisplayName}`, 'success');
-      } catch (error) {
-        // 失败时也要清除进度条，否则会一直停在屏幕顶部
-        this.uploadProgress = null;
-        this.uploadFileName = '';
-        console.log('❌ 移动文件过程中捕获到错误:', error);
-        console.log('- 错误类型:', typeof error);
-        console.log('- 错误值:', error);
-        console.log('- 是否为null:', error === null);
-        console.log('- 是否权限错误:', error && error.isAuthError);
-        console.log('- 目标路径:', targetPath);
-
-        if (error === null) {
-          console.log('✅ 用户取消操作');
-          return; // 用户取消
-        }
-
-        // 检查是否是权限错误
-        if (error.isAuthError) {
-          console.log('🔒 检测到权限错误，显示权限对话框');
-          this.showPermissionDialog('移动文件');
-          return;
-        }
-
-        console.error('❌ 移动失败:', error);
-
-        // 根据目标路径给出更具体的错误提示
-        const targetDisplayName = targetPath === '' ? '根目录' :
-          targetPath.replace(/.*\/(?!$)|\//g, '') + '/';
-        console.log('📢 显示错误提示:', targetDisplayName);
-        this.showCustomToast(`移动文件到 ${targetDisplayName} 失败：您可能没有该目录的写入权限，或者目标路径不正确。`, 'error', 5000);
-      }
-    },
-
     // 获取用户有权限访问的目录列表
-    async getAccessibleFolders() {
-      const accessibleFolders = [];
-
-      // 如果是只读用户，直接返回空列表
-      if (this.isReadOnlyUser) {
-        return accessibleFolders;
-      }
-
-      // 检查写入权限：使用专门的权限检查API
-      const checkWritePermission = async (path) => {
-        try {
-          // 准备请求头
-          const headers = {
-            'Content-Type': 'application/json'
-          };
-          const savedCredentials = localStorage.getItem('authCredentials');
-          if (savedCredentials) {
-            headers['Authorization'] = `Basic ${savedCredentials}`;
-          }
-
-          const response = await fetch('/api/auth/check-write-permission', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({ path })
-          });
-
-          const result = await response.json();
-
-          console.log(`🔍 权限检查 - 路径: ${path}, 结果:`, result);
-
-          if (result.hasPermission) {
-            console.log(`✅ 权限检查通过 - 路径: ${path}`);
-            return true;
-          } else {
-            console.log(`❌ 权限检查失败 - 路径: ${path}`);
-            return false;
-          }
-        } catch (error) {
-          console.log(`❌ 权限检查异常 - 路径: ${path}, 错误:`, error);
-          return false;
-        }
-      };
-
-      // 收集所有可能的目录
-      const allPossibleFolders = new Set();
-
-      // 1. 添加根目录
-      allPossibleFolders.add('');
-
-      // 2. 添加上级目录
-      if (this.cwd !== '') {
-        const parentPath = this.cwd.replace(/[^\/]+\/$/, '');
-        allPossibleFolders.add(parentPath);
-      }
-
-      // 4. 添加当前目录下的子目录
-      if (this.folders && this.folders.length > 0) {
-        for (const folder of this.folders) {
-          allPossibleFolders.add(folder);
-        }
-      }
-
-      // 5. 尝试发现根目录下的其他顶级目录
-      try {
-        const headers = {};
-        const savedCredentials = localStorage.getItem('authCredentials');
-        if (savedCredentials) {
-          headers['Authorization'] = `Basic ${savedCredentials}`;
-        }
-
-        const response = await fetch(`/api/children/`, { headers });
-        const data = await response.json();
-
-        if (!data.needLogin && data.folders) {
-          // 添加根目录下的所有目录
-          for (const folder of data.folders) {
-            allPossibleFolders.add(folder);
-          }
-        }
-      } catch (error) {
-        console.error('获取根目录失败:', error);
-      }
-
-      // 6. 检查每个目录的写入权限并构建结果
-      for (const path of allPossibleFolders) {
-        // 跳过当前目录，因为移动到当前目录没有意义
-        if (path === this.cwd) {
-          continue;
-        }
-
-        if (await checkWritePermission(path)) {
-          let displayName;
-
-          if (path === '') {
-            displayName = '根目录';
-          } else if (this.cwd !== '' && path === this.cwd.replace(/[^\/]+\/$/, '')) {
-            const parentDisplayName = path === '' ? '根目录' :
-              path.replace(/.*\/(?!$)|\//g, '') + '/';
-            displayName = `上级目录 (${parentDisplayName})`;
-          } else {
-            displayName = path.replace(/.*\/(?!$)|\//g, '') + '/';
-          }
-
-          accessibleFolders.push({
-            path: path,
-            displayName: displayName
-          });
-        }
-      }
-
-      // 去重
-      const uniqueFolders = accessibleFolders.filter((folder, index, self) =>
-        index === self.findIndex(f => f.path === folder.path)
-      );
-
-      // 排序：根目录 -> 上级目录 -> 其他目录
-      uniqueFolders.sort((a, b) => {
-        if (a.path === '') return -1;
-        if (b.path === '') return 1;
-        if (a.displayName.includes('上级目录')) return -1;
-        if (b.displayName.includes('上级目录')) return 1;
-        return a.displayName.localeCompare(b.displayName);
-      });
-
-      return uniqueFolders;
-    },
-
     // 新增：递归获取目录下所有文件和子目录
     // M6：按 marker 循环拉完；超过 20 页（40 万个对象）时抛出错误，调用方
     // （删除/移动文件夹）会中止并提示，不再删了标记就报"已删除"。
@@ -3472,6 +3347,11 @@ export default {
 </script>
 
 <style>
+/* 剪切中的文件/文件夹：置灰，提示“待移动”；粘贴或取消后恢复 */
+.cut-file {
+  opacity: 0.45;
+}
+
 .main {
   display: flex;
   height: 100%;
