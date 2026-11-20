@@ -504,6 +504,7 @@
       @close="closeMediaPreview"
       @show-toast="showCustomToast"
       @request-share="openShareDialog"
+      @request-download="({ key, name }) => downloadWithPerFileToken(key, name)"
     />
 
     <!-- 自定义输入对话框 -->
@@ -836,6 +837,7 @@ export default {
     uploadProgress: null,
     uploadFileName: '', // 进度条当前对应的文件名（上传队列按文件显示，避免百分比乱跳）
     uploadQueue: [],
+    currentUpload: null, // F3：正在传的文件 { basedir, name }，已不在队列里；uploadFiles 算撞名时把它也算进去
     backgroundImageUrl: "/assets/bg-cat.webp",
     needLogin: false,
     isGuest: true, // 默认为游客状态
@@ -1443,7 +1445,9 @@ export default {
       // 准备请求头
       const headers = {
         "x-amz-copy-source": encodeURIComponent(source),
-        "Content-Type": "application/octet-stream"
+        "Content-Type": "application/octet-stream",
+        // F3：服务端撞名保护（目标已存在时返回 412，不覆盖）
+        "If-None-Match": "*"
       };
       const savedCredentials = localStorage.getItem('authCredentials');
       if (savedCredentials) {
@@ -1475,6 +1479,14 @@ export default {
             console.log('🔒 copyPaste 权限错误:', authError);
             throw authError;
           }
+          if (response.status === 412) {
+            // F3：目标已存在（服务端拒绝覆盖）。调用方据此决定是改名重试
+            // （单文件粘贴）还是记为复制失败（文件夹内文件）。
+            const conflictError = new Error(`目标已存在：${target}`);
+            conflictError.isConflict = true;
+            conflictError.status = 412;
+            throw conflictError;
+          }
           // 其他HTTP错误
           const httpError = new Error(`请求失败：HTTP ${response.status} ${response.statusText}`);
           console.log('❌ copyPaste HTTP错误:', httpError);
@@ -1487,6 +1499,11 @@ export default {
 
         // 如果已经是我们的权限错误，直接抛出
         if (error.isAuthError) {
+          throw error;
+        }
+
+        // F3：412 撞名错误直接抛出（带 isConflict 标记），调用方据此改名重试或记为失败
+        if (error.isConflict) {
           throw error;
         }
 
@@ -2010,7 +2027,7 @@ export default {
       try {
         for (const fileKey of this.selectedFiles) {
           const link = document.createElement('a');
-          link.href = this.rawUrl(fileKey);
+          link.href = await this.perFileUrl(fileKey);
           link.download = fileKey.split('/').pop();
           document.body.appendChild(link);
           link.click();
@@ -2321,8 +2338,38 @@ export default {
       fileElement.value = null;
     },
 
-    preview(filePath) {
-      window.open(filePath);
+    // F5：预览/下载用的单文件链接。不要直接用 rawUrl 的目录级令牌——
+    // 地址栏/下载链接里的目录令牌能读整个目录（12 小时内有效）。
+    // 向 /api/sign 申请只对这一个文件有效的令牌；失败时回退到目录令牌。
+    // 只读用户调 /api/sign 会 403（签名链接属于写操作），直接用目录令牌
+    // （他们本来就能读这个目录）；访客目录文件走 /api/sign 返回公开直链。
+    async perFileUrl(key) {
+      if (this.isReadOnlyUser) return this.rawUrl(key);
+      try {
+        const res = await axios.post('/api/sign', { key });
+        if (res?.data?.url) return res.data.url;
+      } catch (error) {
+        // 回退到目录令牌（例如未登录、网络异常）
+      }
+      return this.rawUrl(key);
+    },
+
+    // F5：非媒体文件的新标签页预览。先同步打开一个空白页（在用户手势内，
+    // 不会被拦截），拿到单文件令牌后再导航过去；直接 await 再 window.open
+    // 会被浏览器当成弹窗拦截。
+    async previewFile(key) {
+      const win = window.open('', '_blank');
+      try {
+        const url = await this.perFileUrl(key);
+        if (win) {
+          win.location.href = url;
+        } else {
+          window.open(url, '_blank');
+        }
+      } catch (error) {
+        if (win) win.close();
+        this.showCustomToast('打开预览失败: ' + (error.message || '未知错误'), 'error');
+      }
     },
 
     // 处理文件点击（区分搜索结果和普通文件）
@@ -2354,8 +2401,8 @@ export default {
         this.searchResults = [];
         this.cwd = directory;
       } else {
-        // 普通非媒体文件：直接预览/下载
-        this.preview(this.rawUrl(file.key));
+        // 普通非媒体文件：直接预览/下载（单文件令牌，不用目录令牌）
+        this.previewFile(file.key);
       }
     },
 
@@ -2711,9 +2758,34 @@ export default {
               deleteFailed.push({ name: this.displayNameForKey(f.key) });
             }
           } else {
-            const targetFile = `${this.cwd}${resolved.name}`;
-            try {
-              await this.copyPaste(item.key, targetFile);
+            // F3：单文件粘贴。copyPaste 发 If-None-Match: *，目标已存在时返回
+            // 412（isConflict）；此时重新算一个名字再试，最多 3 次，仍撞就记为失败。
+            let targetName = resolved.name;
+            let copied = false;
+            for (let attempt = 0; attempt < 3 && !copied; attempt++) {
+              const targetFile = `${this.cwd}${targetName}`;
+              try {
+                await this.copyPaste(item.key, targetFile);
+                copied = true;
+              } catch (error) {
+                if (error.isAuthError) {
+                  authAborted = true;
+                  failedKeys.push(...todo.slice(i + 1).map(t => t.key));
+                  break;
+                }
+                if (error.isConflict && attempt < 2) {
+                  usedNames.add(targetName);
+                  const r = this.resolveAutoName(item.name, false, usedNames);
+                  if (r.renamed) renamed.push({ from: targetName, to: r.name });
+                  targetName = r.name;
+                  continue;
+                }
+                copyFailed.push({ name: item.name });
+                failedKeys.push(item.key);
+                break;
+              }
+            }
+            if (copied) {
               succeeded++;
               if (isCut) {
                 try {
@@ -2728,16 +2800,8 @@ export default {
                   deleteFailed.push({ name: item.name });
                 }
               }
-            } catch (error) {
-              if (error.isAuthError) {
-                authAborted = true;
-                failedKeys.push(...todo.slice(i + 1).map(t => t.key));
-                break;
-              }
-              console.error(`${verb}文件 ${item.key} 失败:`, error);
-              copyFailed.push({ name: item.name });
-              failedKeys.push(item.key);
             }
+            if (authAborted) break;
           }
         }
 
@@ -2835,17 +2899,20 @@ export default {
         this.fetchFiles();
         this.uploadProgress = null;
         this.uploadFileName = '';
+        this.currentUpload = null;
         return;
       }
 
       /** @type File **/
       const { basedir, file, targetName } = this.uploadQueue.shift();
       // 上传用的实际文件名（撞名时已在入队时自动改名；无 targetName 时回退到原名）
-      const uploadName = targetName || file.name;
+      let uploadName = targetName || file.name;
       let thumbnailDigest = null;
       // 进度条按当前文件显示（M8）：每换一个文件重置百分比并显示文件名
       this.uploadFileName = uploadName;
       this.uploadProgress = 0;
+      // F3：记下正在传的文件（名 + 目录），uploadFiles 算撞名时把它也算进去
+      this.currentUpload = { basedir, name: uploadName };
 
       if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
         try {
@@ -2865,28 +2932,54 @@ export default {
         }
       }
 
-      try {
-        const uploadUrl = `/api/write/items/${apiPath(basedir + uploadName)}`;
-        const headers = {};
-        const onUploadProgress = (progressEvent) => {
-          var percentCompleted =
-            (progressEvent.loaded * 100) / progressEvent.total;
-          this.uploadProgress = percentCompleted;
-        };
-        if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
-        if (file.size >= SIZE_LIMIT) {
-          await multipartUpload(`${basedir}${uploadName}`, file, {
-            headers,
-            onUploadProgress,
-          });
-        } else {
-          await axios.put(uploadUrl, file, { headers, onUploadProgress });
+      // F3：服务端撞名保护。每次尝试都发 If-None-Match: *（目标已存在时服务端
+      // 返回 412，不覆盖）；412 时重新算一个名字再试，最多 3 次，仍撞就报错。
+      // 缩略图是按内容摘要存的，与文件名无关，重试不用重新生成。
+      let uploaded = false;
+      let lastError = null;
+      for (let attempt = 0; attempt < 3 && !uploaded; attempt++) {
+        this.uploadFileName = uploadName;
+        this.currentUpload = { basedir, name: uploadName };
+        this.uploadProgress = 0;
+        try {
+          const uploadUrl = `/api/write/items/${apiPath(basedir + uploadName)}`;
+          const headers = { "If-None-Match": "*" };
+          const onUploadProgress = (progressEvent) => {
+            var percentCompleted =
+              (progressEvent.loaded * 100) / progressEvent.total;
+            this.uploadProgress = percentCompleted;
+          };
+          if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
+          if (file.size >= SIZE_LIMIT) {
+            await multipartUpload(`${basedir}${uploadName}`, file, {
+              headers,
+              onUploadProgress,
+              ifNoneMatch: true,
+            });
+          } else {
+            await axios.put(uploadUrl, file, { headers, onUploadProgress });
+          }
+          uploaded = true;
+        } catch (error) {
+          lastError = error;
+          if (error?.response?.status === 412 && attempt < 2) {
+            const used = new Set(this.files.map((f) => f.key.split('/').pop()));
+            used.add(uploadName);
+            for (const t of this.uploadQueue) {
+              if (t.basedir === basedir) used.add(t.targetName || t.file.name);
+            }
+            uploadName = this.resolveAutoName(file.name, false, used).name;
+            continue;
+          }
+          break;
         }
-      } catch (error) {
+      }
+      this.currentUpload = null;
+      if (!uploaded) {
         // M8：上传失败要明确告诉用户是哪个文件、为什么失败（以前只写 console）
-        const reason = error.response?.data?.error || error.message || '未知错误';
+        const reason = lastError?.response?.data?.error || lastError?.message || '未知错误';
         this.showCustomToast(`上传失败："${uploadName}"（${reason}）`, 'error');
-        console.log(`Upload ${uploadName} failed`, error);
+        console.log(`Upload ${uploadName} failed`, lastError);
       }
       setTimeout(this.processUploadQueue);
     },
@@ -3076,13 +3169,28 @@ export default {
       }
     },
 
+    // F5：下载用单文件令牌（见 perFileUrl），不用目录令牌。
+    // 由媒体预览的下载按钮触发（MediaPreview 发 request-download 事件）。
+    async downloadWithPerFileToken(key, filename) {
+      this.showContextMenu = false;
+      try {
+        const link = document.createElement('a');
+        link.href = await this.perFileUrl(key);
+        link.download = filename || key.split('/').pop();
+        link.click();
+        this.showCustomToast(`开始下载文件`, 'success');
+      } catch (error) {
+        this.showCustomToast('文件下载失败: ' + error.message, 'error');
+      }
+    },
+
     async singleDownload(key){
       // 关闭右键菜单
       this.showContextMenu = false;
       
       try {
         const link = document.createElement('a');
-        link.href = this.rawUrl(key);
+        link.href = await this.perFileUrl(key);
         link.download = key.split('/').pop();
         link.click();
         this.showCustomToast(`开始下载文件`, 'success');
@@ -3200,6 +3308,11 @@ export default {
       for (const f of this.files) usedNames.add(f.key.split('/').pop());
       for (const t of this.uploadQueue) {
         if (t.basedir === this.cwd) usedNames.add(t.targetName || t.file.name);
+      }
+      // F3：正在传的文件已不在队列里（已 shift 出来），把它也算进去，
+      // 避免同名文件在它还没传完时入队、撞上同一个目标名。
+      if (this.currentUpload && this.currentUpload.basedir === this.cwd) {
+        usedNames.add(this.currentUpload.name);
       }
       const renamed = [];
       const uploadTasks = Array.from(files).map((file) => {

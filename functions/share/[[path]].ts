@@ -11,6 +11,7 @@
 
 import { getBucket } from "@/utils/bucket";
 import { applyObjectSecurityHeaders } from "@/utils/response";
+import { getClientIP, checkSharePasswordLimit, recordSharePasswordFailure } from "@/utils/login-limit";
 import {
   shareKeyForId,
   checkShareAccess,
@@ -112,6 +113,15 @@ export async function onRequestGet(context) {
     return streamFile(context, share.key, true);
   }
   if (url.searchParams.has("preview")) {
+    // F7：非媒体文件的预览就是一次完整下载（浏览器直接拿到整个文件），
+    // 计入下载次数，避免 maxDownloads 被预览绕过；图片/视频/音频的预览
+    // 只是分享页里的内联展示，不计。计数仍是读-改-写（并发下可能少计），
+    // 与下载分支一致，接受该竞态。
+    const obj = await bucket.head(share.key);
+    const type = obj?.httpMetadata?.contentType || "";
+    if (!type.startsWith("image/") && !type.startsWith("video/") && !type.startsWith("audio/")) {
+      await recordShareDownload(bucket, share);
+    }
     return streamFile(context, share.key, false);
   }
 
@@ -164,7 +174,19 @@ export async function onRequestPost(context) {
   } catch {
     return passwordForm(id, "提交失败，请重试");
   }
+  // F6：分享密码也限流（与登录限流同一套 KV 和阈值，键 share_limit:<id>:<IP>）。
+  // 拿到链接的人不能无限试密码；被封禁时不再校验密码（也不透露密码是否正确）。
+  const clientIP = getClientIP(context.request);
+  const limit = await checkSharePasswordLimit(context.env, id, clientIP);
+  if (!limit.allowed) {
+    return passwordForm(id, `密码尝试次数过多，请在 ${Math.ceil((limit.remainingBanTime || 0) / 60)} 分钟后重试`);
+  }
   if (!(await verifySharePassword(share, password))) {
+    await recordSharePasswordFailure(context.env, id, clientIP);
+    const updated = await checkSharePasswordLimit(context.env, id, clientIP);
+    if (!updated.allowed) {
+      return passwordForm(id, `密码尝试次数过多，请在 ${Math.ceil((updated.remainingBanTime || 0) / 60)} 分钟后重试`);
+    }
     return passwordForm(id, "密码错误");
   }
 

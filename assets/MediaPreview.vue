@@ -526,11 +526,10 @@ export default {
     },
     
     // 下载功能
+    // F5：下载交给父组件（它会向 /api/sign 申请单文件令牌，不用目录令牌）。
+    // 这里只发事件，不直接用 currentMedia.url（那是目录令牌地址）。
     downloadMedia() {
-      const link = document.createElement('a');
-      link.href = this.currentMedia.url;
-      link.download = this.currentMedia.name;
-      link.click();
+      this.$emit('request-download', { key: this.currentMedia.key, name: this.currentMedia.name });
     },
     
     // 分享功能：交给父组件的统一分享对话框（H1：绝不能直接复制当前媒体的

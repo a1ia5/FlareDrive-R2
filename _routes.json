@@ -1,1 +1,1 @@
-{"exclude":[],"include":["/api/*","/dav/*","/raw/*","/share/*","/utils/*","/scripts/*","/migrations/*","/docs/*","/functions/*","/README.md","/test-login-limit.html","/test-permission.html"],"version":1}
+{"exclude":[],"include":["/api/*","/dav/*","/raw/*","/share/*","/utils/*","/scripts/*","/migrations/*","/docs/*","/functions/*","/README.md","/test-login-limit.html","/test-permission.html","/test-login-limit","/test-permission","/package.json","/package-lock.json","/tsconfig.json","/LICENSE"],"version":1}

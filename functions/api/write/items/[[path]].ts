@@ -60,6 +60,25 @@ export async function onRequestPostCompleteMultipart(context) {
 
   const completeBody: { parts: Array<any> } = await request.json();
 
+  // F3：分片完成没有条件写入（R2 的 complete 不支持 onlyIf）。客户端发
+  // If-None-Match: * 时，先查目标是否已存在；已存在则中止分片上传并返回
+  // 412，拒绝覆盖（best effort，仍有 head 与 complete 之间的竞态窗口，
+  // 但比直接覆盖好；单 PUT 走 onlyIf，是严格的）。
+  if ((request.headers.get("if-none-match") || "").trim() === "*") {
+    const existing = await bucket.head(path);
+    if (existing) {
+      try {
+        await multipartUpload.abort();
+      } catch {
+        // 中止失败不影响本次 412（孤儿分片由 R2 侧清理）
+      }
+      return new Response(JSON.stringify({ error: "目标文件已存在" }), {
+        status: 412,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+
   try {
     const object = await multipartUpload.complete(completeBody.parts);
     return new Response(null, {
@@ -220,10 +239,23 @@ export async function onRequestPut(context) {
   if (thumbnailHeader && /^[0-9a-f]{40}$/.test(thumbnailHeader))
     customMetadata.thumbnail = thumbnailHeader;
 
-  const obj = await bucket.put(path, content, {
+  // F3：服务端撞名保护。客户端发 If-None-Match: * 时，只有目标不存在才写入；
+  // 已存在则 bucket.put 返回 null，这里返回 412，拒绝静默覆盖。
+  // （不发该头时保持原来的覆盖行为，向后兼容；复制/粘贴也走这条 PUT。）
+  const putOptions: Record<string, any> = {
     customMetadata,
     httpMetadata: contentType ? { contentType } : undefined,
-  });
+  };
+  if ((request.headers.get("if-none-match") || "").trim() === "*") {
+    putOptions.onlyIf = { etagDoesNotMatch: "*" };
+  }
+  const obj = await bucket.put(path, content, putOptions);
+  if (!obj) {
+    return new Response(JSON.stringify({ error: "目标文件已存在" }), {
+      status: 412,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
   const { key, size, uploaded } = obj;
   return new Response(JSON.stringify({ key, size, uploaded }), {
     headers: { "Content-Type": "application/json" },

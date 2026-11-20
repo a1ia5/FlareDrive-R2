@@ -75,8 +75,11 @@ export function createZipStream(entries: ZipEntry[]): ReadableStream<Uint8Array>
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
 
+  // F8：ZIP 条目名里的反斜杠换成下划线。Windows 解压工具可能把 "\" 当成
+  // 路径分隔符，导致文件被解到意料之外的目录；"/" 是 ZIP 的标准分隔符，保留。
+  const safeName = (name: string): string => name.replace(/\\/g, "_");
   // 事先算好所有偏移（见上）
-  const nameBytes = entries.map((e) => new TextEncoder().encode(e.name));
+  const nameBytes = entries.map((e) => new TextEncoder().encode(safeName(e.name)));
   const headerOffsets: number[] = [];
   {
     let off = 0;

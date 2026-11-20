@@ -262,7 +262,10 @@ export async function multipartUpload(key, file, options) {
     uploadedParts[partNumber - 1] = { partNumber, etag };
   }
   const completeParams = new URLSearchParams({ uploadId });
+  // F3：分片完成没有条件写入；客户端要求时带上 If-None-Match: *，
+  // 服务端在 complete 前先查目标是否已存在，已存在返回 412（并中止分片上传）。
+  const completeHeaders = options?.ifNoneMatch ? { "If-None-Match": "*" } : {};
   await axios.post(`/api/write/items/${apiPath(key)}?${completeParams}`, {
     parts: uploadedParts,
-  });
+  }, { headers: completeHeaders });
 }

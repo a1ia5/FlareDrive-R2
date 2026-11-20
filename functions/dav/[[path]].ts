@@ -161,11 +161,13 @@ async function propfind(context, bucket, user: UserInfo, path: string, wantDir: 
   const parts: string[] = [];
 
   if (res.kind === "file") {
-    if (!userCanRead(user, env, path)) return text(403, "没有访问权限");
+    // F8：不存在和无权限返回同一个 404，不让已登录用户用 404/403 的区别
+    // 探测某个 key 是否存在于自己无权读取的目录里（与 /raw/ 的统一 404 一致）。
+    if (!userCanRead(user, env, path)) return text(404, "Not found");
     parts.push(propResponse(hrefFor(path, false), fileProps(res.object)));
   } else {
     const prefix = path ? path + "/" : "";
-    if (prefix && !userCanTraverse(user, env, prefix)) return text(403, "没有访问权限");
+    if (prefix && !userCanTraverse(user, env, prefix)) return text(404, "Not found");
     parts.push(propResponse(hrefFor(path, true), dirProps(path)));
 
     const depth = context.request.headers.get("Depth");
@@ -209,8 +211,9 @@ async function propfind(context, bucket, user: UserInfo, path: string, wantDir: 
 async function getFile(context, bucket, user: UserInfo, path: string, headOnly: boolean): Promise<Response> {
   if (!path) return text(headOnly ? 200 : 405, "", { Allow: ALLOW });
   if (!userCanRead(user, context.env, path)) {
-    // 可能是一个允许"路过"的目录
-    return text(userCanTraverse(user, context.env, path + "/") ? 405 : 403, "", { Allow: ALLOW });
+    // F8：无权读取时返回 404（而不是 403），不透露该路径是否存在；
+    // 只有"路过"的目录（可进入但不可读文件本身）才返回 405。
+    return text(userCanTraverse(user, context.env, path + "/") ? 405 : 404, "", { Allow: ALLOW });
   }
 
   const request: Request = context.request;

@@ -37,14 +37,18 @@ function warnLoginLimitDisabled() {
   );
 }
 
-// 检查用户是否被封禁
+// 检查用户是否被封禁（KV 键由调用方给：登录用 login_limit:<用户名>:<IP>，
+// 分享密码用 share_limit:<分享ID>:<IP>，见 F6）。
 export async function checkAuthLimit(env, username, clientIP) {
+  return checkLimitByKey(env, `login_limit:${username}:${clientIP}`);
+}
+
+async function checkLimitByKey(env, key) {
   if (!env.LOGIN_ATTEMPTS) {
     warnLoginLimitDisabled();
     return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
   }
 
-  const key = `login_limit:${username}:${clientIP}`;
   const limitData = await env.LOGIN_ATTEMPTS.get(key);
 
   if (!limitData) {
@@ -101,11 +105,14 @@ export async function checkAuthLimit(env, username, clientIP) {
 
 // 记录一次认证失败
 export async function recordAuthFailure(env, username, clientIP) {
+  return recordFailureByKey(env, `login_limit:${username}:${clientIP}`);
+}
+
+async function recordFailureByKey(env, key) {
   if (!env.LOGIN_ATTEMPTS) {
     return;
   }
 
-  const key = `login_limit:${username}:${clientIP}`;
   const limitData = await env.LOGIN_ATTEMPTS.get(key);
   const now = Math.floor(Date.now() / 1000);
 
@@ -136,4 +143,20 @@ export async function clearAuthLimit(env, username, clientIP) {
 
   const key = `login_limit:${username}:${clientIP}`;
   await env.LOGIN_ATTEMPTS.delete(key);
+}
+
+// ---------------------------------------------------------------------------
+// F6：分享访问密码的试错限流（与登录限流共用同一套 KV 和阈值，键不同）。
+// 分享 ID 是 10 位随机字符，猜不到；但拿到链接的人可以无限试密码。
+// 键：share_limit:<分享ID>:<IP>。LOGIN_ATTEMPTS 未绑定时不限流（fail-open）。
+// ---------------------------------------------------------------------------
+
+// 检查该分享的密码是否已被封禁
+export async function checkSharePasswordLimit(env, shareId, clientIP) {
+  return checkLimitByKey(env, `share_limit:${shareId}:${clientIP}`);
+}
+
+// 记录一次分享密码错误
+export async function recordSharePasswordFailure(env, shareId, clientIP) {
+  return recordFailureByKey(env, `share_limit:${shareId}:${clientIP}`);
 }
