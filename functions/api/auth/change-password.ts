@@ -1,4 +1,4 @@
-import { resolveAccount, clearAccountCache } from "@/utils/auth";
+import { authenticateBasic, clearAccountCache } from "@/utils/auth";
 import { hasD1, updateD1Password } from "@/utils/d1auth";
 import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 
@@ -32,9 +32,9 @@ export async function onRequestPost(context) {
             return json({ success: false, message: "无效的认证信息" }, 401);
         }
 
-        // 校验旧的用户名密码
-        const userInfo = await resolveAccount(account, context);
-        if (!userInfo.exists) {
+        // 校验旧的用户名密码（N2：走 authenticateBasic，失败也计数）。
+        const userInfo = await authenticateBasic(context, account);
+        if (!userInfo) {
             return json({ success: false, message: "用户名或密码错误" }, 401);
         }
 

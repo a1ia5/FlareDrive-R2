@@ -1,4 +1,4 @@
-import { resolveAccount } from "@/utils/auth";
+import { authenticateBasic } from "@/utils/auth";
 import { createD1User, getD1User, hasD1 } from "@/utils/d1auth";
 import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 
@@ -38,8 +38,9 @@ export async function onRequestPost(context) {
         }
 
         const account = atob(authHeader.split("Basic ")[1]);
-        const adminInfo = await resolveAccount(account, context);
-        if (!adminInfo.exists || !adminInfo.isAdmin) {
+        // N2：走 authenticateBasic，失败也计数、封禁也生效。
+        const adminInfo = await authenticateBasic(context, account);
+        if (!adminInfo || !adminInfo.isAdmin) {
             return json({ success: false, message: "需要管理员权限" }, 403);
         }
 

@@ -277,7 +277,9 @@ async function deleteResource(context, bucket, user: UserInfo, path: string, wan
   if (res.kind === "none") return text(404, "Not found");
 
   if (res.kind === "file") {
-    if (!userCanWrite(user, context.env, path)) return text(403, "没有写入权限");
+    // N5（F8 的另一半）：不存在和无权限返回同一个 404，不让已登录用户
+    // 用 404/403 的区别探测某个 key 是否存在于自己无权写入的目录里。
+    if (!userCanWrite(user, context.env, path)) return text(404, "Not found");
     // N1：resolve() 里已经 head 过，缩略图摘要直接取现成的。
     const digest = res.object?.customMetadata?.thumbnail ?? null;
     await bucket.delete(path);
@@ -287,7 +289,8 @@ async function deleteResource(context, bucket, user: UserInfo, path: string, wan
   }
 
   const prefix = path + "/";
-  if (!userCanWrite(user, context.env, prefix)) return text(403, "没有写入权限");
+  // N5：同上，无权限删目录也返回 404（而不是 403）。
+  if (!userCanWrite(user, context.env, prefix)) return text(404, "Not found");
   // L11：目录过大时拒绝删除，而不是删掉不完整的 key 集合后报成功
   // N1：一次列表同时拿到 key 和缩略图摘要（删完就读不到了）。
   const { keys, truncated, digests } = await listAllKeys(bucket, prefix, true);
@@ -363,11 +366,12 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
     return text(403, "不能把目录复制或移动到它自己的上级或下级目录");
   }
 
-  // 权限：COPY 需要源的读权限，MOVE 需要源的写权限；目标都需要写权限
+  // 权限：COPY 需要源的读权限，MOVE 需要源的写权限；目标都需要写权限。
+  // N5：无权限也返回 404（而不是 403），不透露源或目标是否存在。
   const srcCheck = isDir ? srcPrefix : path;
   const srcOk = move ? userCanWrite(user, env, srcCheck) : userCanRead(user, env, srcCheck);
   const dstOk = userCanWrite(user, env, isDir ? dstPrefix : to);
-  if (!srcOk || !dstOk) return text(403, "没有权限");
+  if (!srcOk || !dstOk) return text(404, "Not found");
 
   // 目标已存在：Overwrite: F → 412。注意这里不再像以前那样先删除目标
   // （H3/M5）：旧目标只有在新内容完整提交之后才会被清理。
@@ -375,7 +379,8 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
   const overwrite = (context.request.headers.get("Overwrite") || "T").toUpperCase() !== "F";
   if (existing.kind !== "none") {
     if (!overwrite) return text(412, "目标已存在");
-    if (existing.kind === "dir" && !userCanWrite(user, env, dstPrefix)) return text(403, "没有权限");
+    // N5：目标目录存在但无权写入，也返回 404，不透露目标是否存在。
+    if (existing.kind === "dir" && !userCanWrite(user, env, dstPrefix)) return text(404, "Not found");
   }
   const dstExisted = existing.kind !== "none";
   // 覆盖时需要知道旧目标里有哪些 key：提交完成后删掉不在新内容里的旧文件

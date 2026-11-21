@@ -678,7 +678,7 @@
         {{ clipboardLabel() }}
       </div>
       <!-- 移动端：角上的 ×，点一下取消剪贴板（桌面用 Esc 取消） -->
-      <button v-if="isMobile" class="paste-dismiss-btn" @touchstart.stop @touchend.stop="clearClipboard" @click.stop="clearClipboard" aria-label="取消">×</button>
+      <button v-if="isMobile" class="paste-dismiss-btn" @touchstart.stop @touchend.stop.prevent="clearClipboard" @click.stop="clearClipboard" aria-label="取消">×</button>
     </div>
 
     <!-- 自定义提示组件 -->
@@ -2331,10 +2331,12 @@ export default {
     // 向 /api/sign 申请只对这一个文件有效的令牌；失败时回退到目录令牌。
     // 只读用户调 /api/sign 会 403（签名链接属于写操作），直接用目录令牌
     // （他们本来就能读这个目录）；访客目录文件走 /api/sign 返回公开直链。
+    // N4：令牌只给 10 分钟——够打开/下载，地址栏里抄走的链接一周后就
+    // 失效了（/api/sign 默认是 7 天）。
     async perFileUrl(key) {
       if (this.isReadOnlyUser) return this.rawUrl(key);
       try {
-        const res = await axios.post('/api/sign', { key });
+        const res = await axios.post('/api/sign', { key, expiresIn: 600 });
         if (res?.data?.url) return res.data.url;
       } catch (error) {
         // 回退到目录令牌（例如未登录、网络异常）
@@ -2661,9 +2663,13 @@ export default {
       // 标志在 finally 里清除，任何提前返回/报错都不会卡住
       this.isPasting = true;
       try {
-        // 目标目录现有名称（粘贴目标就是当前目录；文件为名，文件夹为名+'/'）。
-        // 以当前列表为准：导航后 fetchFiles 已刷新；若列表过期，极少数情况下撞名可能漏判，
-        // 后端不校验撞名，仍会覆盖——不要在列表未加载完时粘贴。
+        // N3：把目标目录快照下来——粘贴执行中有 await，期间用户仍可导航；
+        // 后面一律用 targetDir，不再现读 this.cwd，否则剩余的项会被写到
+        // 新目录去（剪切还会把源删掉，等于悄悄移错了地方）。
+        const targetDir = this.cwd;
+        // 目标目录现有名称（粘贴目标就是 targetDir；文件为名，文件夹为名+'/'）。
+        // 以粘贴开始时的列表为准；若列表过期，极少数情况下撞名可能漏判，
+        // 后端 412 会兜底——不要在列表未加载完时粘贴。
         const usedNames = new Set();
         for (const f of this.files) usedNames.add(f.key.split('/').pop());
         for (const d of this.folders) usedNames.add(d.replace(/\/$/, '').split('/').pop() + '/');
@@ -2676,13 +2682,13 @@ export default {
         for (const key of items) {
           const name = this.displayNameForKey(key);
           const isFolder = key.endsWith('_$folder$');
-          if (isCut && this.parentDirOfKey(key) === this.cwd) {
+          if (isCut && this.parentDirOfKey(key) === targetDir) {
             skipped.push({ name, reason: '已在当前目录' });
             continue;
           }
           if (isFolder) {
             const folderPath = key.slice(0, -9);
-            if (this.cwd === folderPath || this.cwd.startsWith(folderPath)) {
+            if (targetDir === folderPath || targetDir.startsWith(folderPath)) {
               skipped.push({ name, reason: '不能移入自身或子目录' });
               continue;
             }
@@ -2732,7 +2738,7 @@ export default {
           if (resolved.renamed) renamed.push({ from: resolved.original, to: resolved.name });
 
           if (item.isFolder) {
-            const targetFolderPath = `${this.cwd}${resolved.name}/`;
+            const targetFolderPath = `${targetDir}${resolved.name}/`;
             const result = await this.transferFolder(item.key, targetFolderPath, isCut);
             if (result.authAborted) {
               authAborted = true;
@@ -2757,7 +2763,7 @@ export default {
             let targetName = resolved.name;
             let copied = false;
             for (let attempt = 0; attempt < 3 && !copied; attempt++) {
-              const targetFile = `${this.cwd}${targetName}`;
+              const targetFile = `${targetDir}${targetName}`;
               try {
                 await this.copyPaste(item.key, targetFile);
                 copied = true;

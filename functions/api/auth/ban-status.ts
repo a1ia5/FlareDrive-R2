@@ -1,4 +1,4 @@
-import { resolveAccount } from "@/utils/auth";
+import { authenticateBasic } from "@/utils/auth";
 
 // 查询用户封禁状态API
 function getClientIP(request) {
@@ -38,7 +38,8 @@ export async function onRequestPost(context) {
         const Authorization = authHeader.split("Basic ")[1];
         const account = atob(Authorization);
 
-        const adminInfo = !account ? null : await resolveAccount(account, context);
+        // N2：走 authenticateBasic，失败也计数、封禁也生效。
+        const adminInfo = !account ? null : await authenticateBasic(context, account);
         if (!adminInfo || !adminInfo.exists) {
             return new Response(JSON.stringify({
                 success: false,

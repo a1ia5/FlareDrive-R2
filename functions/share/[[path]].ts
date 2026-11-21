@@ -46,7 +46,18 @@ function formatSize(size: number): string {
 
 function page(title: string, body: string, status = 200): Response {
   const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${htmlEscape(title)} - FlareDrive 分享</title><style>body{font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px;color:#222}h1{font-size:20px;word-break:break-all}.meta{color:#666;font-size:14px;line-height:1.8}.btn{display:inline-block;margin-top:16px;padding:10px 24px;background:#007bff;color:#fff;text-decoration:none;border-radius:6px}.preview{max-width:100%;margin-top:16px}input{padding:8px;width:100%;box-sizing:border-box;margin:8px 0}button{padding:10px 24px;background:#007bff;color:#fff;border:none;border-radius:6px;cursor:pointer}.error{color:#dc3545}</style></head><body>${body}<p style="margin-top:32px;color:#999;font-size:13px">FlareDrive 分享 · 下载次数按下载请求计数</p></body></html>`;
-  return new Response(html, { status, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+  return new Response(html, { status, headers: {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    // N7：分享页是 Function 响应，_headers 不适用，这里直接加。
+    // X-Frame-Options: DENY——下载按钮不能被套进别人的页面里点；
+    // Referrer-Policy: no-referrer——URL 本身就是密钥，不通过 Referer 泄露；
+    // CSP：页面只有内联样式、同源图片（缩略图）和同源表单（密码），其它一律不加载。
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'",
+  } });
 }
 
 function notFoundPage(message: string, status = 404): Response {

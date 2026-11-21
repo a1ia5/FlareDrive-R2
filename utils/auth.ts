@@ -143,7 +143,11 @@ export async function resolveAccount(account: string, context): Promise<UserInfo
         // 账户串里必须有 ":"，否则 "GUEST"、"BUCKET" 这类普通环境变量名
         // 会被当成一个没有密码的账户。
         if (sepIndex > 0) {
-            const rw = context.env[account];
+            // N1：账户串以 ":r" 结尾时不能再当成读写账户查——否则只读账户
+            // （环境变量名本身就是 "user:pass:r"）用密码 "pass:r" 登录会被
+            // 命中，直接拿到读写权限。读写账户的密码本身也不能以 ":r"
+            // 结尾（与只读命名撞了，无法区分）；这类账户请改用 D1。
+            const rw = account.endsWith(":r") ? undefined : context.env[account];
             const ro = context.env[account + ":r"];
             if (typeof rw === "string") {
                 permissions = rw.split(",");
@@ -171,6 +175,27 @@ export async function resolveAccount(account: string, context): Promise<UserInfo
         accountCache.set(cacheKey, { at: Date.now(), info });
     }
     return info;
+}
+
+// N2：供那些自己解析 Basic 头、不走 getRequestUser 的接口使用——
+// 与 getRequestUser 完全相同的限流逻辑：先查封禁，再校验，失败计数。
+// 返回 null 表示未登录/密码错/已被封禁（调用方统一按 401/403 处理，
+// 不区分原因，避免泄露"密码错"还是"被封禁"）。
+// login.ts 不用它（登录接口成功时要清零，且被封禁时返回 429）。
+export async function authenticateBasic(context, account: string): Promise<UserInfo | null> {
+    if (!account) return null;
+    const username = account.split(":")[0];
+    if (!username) return null;
+    const clientIP = getClientIP(context.request);
+    const limit = await checkAuthLimit(context.env, username, clientIP);
+    if (!limit.allowed) {
+        context.__fdAuthBanned = true;
+        return null;
+    }
+    const info = await resolveAccount(account, context);
+    if (info.exists) return info;
+    await recordAuthFailure(context.env, username, clientIP);
+    return null;
 }
 
 // 从请求的 Authorization: Basic 头解析出已通过校验的账户；没有或无效时返回 null。
@@ -201,19 +226,7 @@ export async function getRequestUser(context): Promise<UserInfo | null> {
             account = "";
         }
         if (account) {
-            const username = account.split(":")[0];
-            const clientIP = getClientIP(context.request);
-            const limit = await checkAuthLimit(context.env, username, clientIP);
-            if (!limit.allowed) {
-                context.__fdAuthBanned = true;
-            } else {
-                const info = await resolveAccount(account, context);
-                if (info.exists) {
-                    user = info;
-                } else {
-                    await recordAuthFailure(context.env, username, clientIP);
-                }
-            }
+            user = await authenticateBasic(context, account);
         }
     }
 

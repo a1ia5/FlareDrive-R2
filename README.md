@@ -42,7 +42,7 @@
 
 1. Fork 本仓库
 2. Cloudflare Pages → 创建项目 → 连接到 Git → 选择仓库
-3. 构建设置：构建命令填 `mkdir -p dist && cp -r index.html assets _headers _redirects favicon.ico robots.txt 404.html _routes.json dist/`，输出目录填 `dist/`
+3. 构建设置：构建命令填 `mkdir -p dist && cp -r index.html assets _headers favicon.ico robots.txt 404.html _routes.json dist/`，输出目录填 `dist/`
 
 > **为什么输出目录必须是 `dist/`？** 如果发布目录是仓库根目录，`utils/`、`scripts/`、`migrations/`、`docs/` 下的源码和内部文件会作为静态文件被匿名访问（整个鉴权模型和签名代码都会公开）。仓库里有 `_routes.json` + 对应的 Function 做兜底拦截（访问这些路径返回 404），但这只是权宜之计；正确做法是把发布目录设为 `dist/`，只发布静态文件。`functions/` 目录始终留在仓库根目录，Pages 会自动把它编译成 Functions。
 
@@ -150,7 +150,7 @@ curl -X POST https://你的域名/api/auth/change-password \
 ```
 
 - **应用内**（缩略图、预览、全景图、下载）：文件列表接口为当前目录签发一个令牌，有效期 12 到 24 小时，只覆盖该目录和缩略图。
-- **分享链接**：右键 → 分享，得到一条短链接 `https://你的域名/share/<10 位随机 ID>`。有效期 1 / 7 / 30 天或长期有效，可选访问密码和下载次数上限；分享页保留预览（图片/视频/音频），下载按钮在同一页。下载次数按下载请求计数，预览不计入。
+- **分享链接**：右键 → 分享，得到一条短链接 `https://你的域名/share/<10 位随机 ID>`。有效期 1 / 7 / 30 天或长期有效，可选访问密码和下载次数上限；分享页只放缩略图（有缩略图的文件放一张 144×144 缩略图，没有的不放），不放原文件预览；下载按钮在同一页。下载次数按下载请求计数。
 - **脚本**：也可以直接带 `Authorization: Basic` 请求 `/raw/`。
 
 分享记录存在内部前缀 `_$flaredrive$/shares/` 下，是一条 JSON（目标文件、过期时间、密码哈希、下载上限、已下载次数、创建者），不能通过 `/raw/` 或文件列表读到。管理入口在右上角菜单 → 管理分享链接，可以查看各条分享的有效期和下载次数、复制链接、逐条撤销（删除记录后链接立即失效）。只有创建者和管理员能看到/撤销一条分享。

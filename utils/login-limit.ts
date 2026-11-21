@@ -37,6 +37,15 @@ function warnLoginLimitDisabled() {
   );
 }
 
+// N10：KV 本身出错（配额、服务异常）时也要 fail-open，不能让一次 KV
+// 读失败把所有认证请求都变成 500。只报一次，避免出错期间刷屏。
+let warnedKvError = false;
+function warnKvError(error) {
+  if (warnedKvError) return;
+  warnedKvError = true;
+  console.error("[SECURITY] LOGIN_ATTEMPTS KV 出错，登录限流已临时关闭（fail-open）：", error);
+}
+
 // 检查用户是否被封禁（KV 键由调用方给：登录用 login_limit:<用户名>:<IP>，
 // 分享密码用 share_limit:<分享ID>:<IP>，见 F6）。
 export async function checkAuthLimit(env, username, clientIP) {
@@ -49,7 +58,14 @@ async function checkLimitByKey(env, key) {
     return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
   }
 
-  const limitData = await env.LOGIN_ATTEMPTS.get(key);
+  let limitData;
+  try {
+    limitData = await env.LOGIN_ATTEMPTS.get(key);
+  } catch (error) {
+    // N10：KV 读失败时 fail-open，不阻塞认证（与"未绑定"同一处理）。
+    warnKvError(error);
+    return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
+  }
 
   if (!limitData) {
     return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
@@ -73,20 +89,30 @@ async function checkLimitByKey(env, key) {
   if (data.attempts >= LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS) {
     // 检查是否超过重置窗口
     if (now - data.firstAttempt > LOGIN_LIMIT_CONFIG.ATTEMPT_WINDOW) {
-      // 重置计数
-      await env.LOGIN_ATTEMPTS.delete(key);
+      // 重置计数（删失败也只影响下一次重算，不阻塞本次放行）
+      try {
+        await env.LOGIN_ATTEMPTS.delete(key);
+      } catch (error) {
+        warnKvError(error);
+      }
       return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
     } else {
       // 设置封禁
       const bannedUntil = now + LOGIN_LIMIT_CONFIG.BAN_DURATION;
-      await env.LOGIN_ATTEMPTS.put(
-        key,
-        JSON.stringify({
-          ...data,
-          bannedUntil,
-        }),
-        { expirationTtl: LOGIN_LIMIT_CONFIG.BAN_DURATION + 3600 }
-      );
+      try {
+        await env.LOGIN_ATTEMPTS.put(
+          key,
+          JSON.stringify({
+            ...data,
+            bannedUntil,
+          }),
+          { expirationTtl: LOGIN_LIMIT_CONFIG.BAN_DURATION + 3600 }
+        );
+      } catch (error) {
+        // N10：封禁写不进去也按本次封禁返回（下次请求会重新算到这里，
+        // 不会因为一次写失败就放过攻击者）。
+        warnKvError(error);
+      }
 
       return {
         allowed: false,
@@ -113,7 +139,14 @@ async function recordFailureByKey(env, key) {
     return;
   }
 
-  const limitData = await env.LOGIN_ATTEMPTS.get(key);
+  let limitData;
+  try {
+    limitData = await env.LOGIN_ATTEMPTS.get(key);
+  } catch (error) {
+    // N10：读不到旧计数就不记这次（fail-open），不要覆盖掉已有记录。
+    warnKvError(error);
+    return;
+  }
   const now = Math.floor(Date.now() / 1000);
 
   let data;
@@ -132,7 +165,12 @@ async function recordFailureByKey(env, key) {
 
   // 设置过期时间为封禁时长 + 1小时的缓冲
   const ttl = LOGIN_LIMIT_CONFIG.BAN_DURATION + 3600;
-  await env.LOGIN_ATTEMPTS.put(key, JSON.stringify(data), { expirationTtl: ttl });
+  try {
+    await env.LOGIN_ATTEMPTS.put(key, JSON.stringify(data), { expirationTtl: ttl });
+  } catch (error) {
+    // N10：写失败就丢这次计数（fail-open），下次请求重新读。
+    warnKvError(error);
+  }
 }
 
 // 清除登录限制记录（登录成功时调用）
@@ -142,7 +180,12 @@ export async function clearAuthLimit(env, username, clientIP) {
   }
 
   const key = `login_limit:${username}:${clientIP}`;
-  await env.LOGIN_ATTEMPTS.delete(key);
+  try {
+    await env.LOGIN_ATTEMPTS.delete(key);
+  } catch (error) {
+    // N10：删失败不影响登录成功本身，记录靠 TTL 自然过期。
+    warnKvError(error);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { resolveAccount } from "@/utils/auth";
+import { authenticateBasic } from "@/utils/auth";
 
 export async function onRequest(context) {
     try {
@@ -30,9 +30,11 @@ export async function onRequest(context) {
             });
         }
 
-        // 校验账户：优先查 D1，再回退旧版环境变量账户
-        const userInfo = await resolveAccount(account, context);
-        if(!userInfo.exists) {
+        // 校验账户：优先查 D1，再回退旧版环境变量账户。
+        // N2：走 authenticateBasic，失败也计数、封禁也生效（以前直接调
+        // resolveAccount，这个口子可以无限试密码）。
+        const userInfo = await authenticateBasic(context, account);
+        if(!userInfo) {
             return new Response("用户名或密码错误", {
                 status: 401,
             });
