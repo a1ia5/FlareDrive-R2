@@ -653,13 +653,15 @@
       </div>
     </Dialog>
 
-    <!-- 桌面端浮动粘贴按钮 -->
+    <!-- 浮动粘贴按钮（桌面：宽版右上角；移动：右侧 56px 小方块，可触摸拖动） -->
     <div
-      v-if="clipboard && canWrite && canWriteHere && !isMobile"
-      class="floating-paste-button desktop"
-      :class="{ 'auto-hide': !isNearPasteButton, 'is-pasting': isPasting }"
+      v-if="clipboard && canWrite && canWriteHere"
+      class="floating-paste-button"
+      :class="{ 'desktop': !isMobile, 'mobile': isMobile, 'auto-hide': !isMobile && !isNearPasteButton, 'is-pasting': isPasting }"
       :style="{ left: pasteButtonPosition.x + 'px', top: pasteButtonPosition.y + 'px' }"
       @mousedown="startDragPasteButton"
+      @touchstart="startDragPasteButton"
+      @touchend="handleTouchEnd"
       @click="handlePasteButtonClick"
       @mouseenter="isNearPasteButton = true"
       @mouseleave="isNearPasteButton = false"
@@ -669,37 +671,14 @@
           <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
           <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
         </svg>
-        <span>{{ clipboardIsCut ? '粘贴（移动）' : '粘贴' }}</span>
-        <kbd class="shortcut-hint">Ctrl+V</kbd>
+        <span v-if="!isMobile">{{ clipboardIsCut ? '粘贴（移动）' : '粘贴' }}</span>
+        <kbd v-if="!isMobile" class="shortcut-hint">Ctrl+V</kbd>
       </div>
-      <div class="paste-file-info">
+      <div v-if="!isMobile" class="paste-file-info">
         {{ clipboardLabel() }}
       </div>
-    </div>
-
-    <!-- 移动端底部粘贴工具栏 -->
-    <div
-      v-if="clipboard && canWrite && canWriteHere && isMobile"
-      class="mobile-paste-toolbar"
-      :class="{ 'is-pasting': isPasting }"
-    >
-      <div class="paste-toolbar-content" @click="handlePasteButtonClick">
-        <div class="paste-info">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
-            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
-          </svg>
-          <span class="paste-text">
-            {{ clipboardIsCut ? '移动' : '粘贴' }} {{ clipboardLabel() }}
-          </span>
-        </div>
-        <button class="paste-close-btn" @click.stop="clearClipboard">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="18" y1="6" x2="6" y2="18"/>
-            <line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
-      </div>
+      <!-- 移动端：角上的 ×，点一下取消剪贴板（桌面用 Esc 取消） -->
+      <button v-if="isMobile" class="paste-dismiss-btn" @touchstart.stop @touchend.stop="clearClipboard" @click.stop="clearClipboard" aria-label="取消">×</button>
     </div>
 
     <!-- 自定义提示组件 -->
@@ -2191,11 +2170,18 @@ export default {
 
     // 初始化粘贴按钮位置
     initPasteButtonPosition() {
-      // 桌面端智能定位：右侧边缘，避开文件列表
-      this.pasteButtonPosition = {
-        x: window.innerWidth - 240,
-        y: 120
-      };
+      // v21：桌面端宽版放右侧边缘；移动端 56px 小方块放右侧中部
+      if (this.isMobile) {
+        this.pasteButtonPosition = {
+          x: window.innerWidth - 56 - 16,
+          y: Math.round(window.innerHeight * 0.4)
+        };
+      } else {
+        this.pasteButtonPosition = {
+          x: window.innerWidth - 240,
+          y: 120
+        };
+      }
     },
 
     // 浮动粘贴按钮相关方法
@@ -2234,9 +2220,9 @@ export default {
       this.pasteButtonPosition.x = clientX - this.dragOffset.x;
       this.pasteButtonPosition.y = clientY - this.dragOffset.y;
 
-      // 限制在视窗范围内
-      const buttonWidth = this.isMobile ? 50 : 120;
-      const buttonHeight = this.isMobile ? 50 : 60;
+      // 限制在视窗范围内（v21：移动端按钮 56px）
+      const buttonWidth = this.isMobile ? 56 : 120;
+      const buttonHeight = this.isMobile ? 56 : 60;
       this.pasteButtonPosition.x = Math.max(0, Math.min(window.innerWidth - buttonWidth, this.pasteButtonPosition.x));
       this.pasteButtonPosition.y = Math.max(0, Math.min(window.innerHeight - buttonHeight, this.pasteButtonPosition.y));
 
@@ -3664,11 +3650,11 @@ export default {
   transform: scale(1) translateY(-3px);
 }
 
-/* v20：粘贴进行中，浮动按钮和移动端工具栏置灰（点击由 pasteFile 的 isPasting 关卡拦住；
+/* v20：粘贴进行中，浮动按钮置灰（点击由 pasteFile 的 isPasting 关卡拦住；
    桌面端用 .desktop.is-pasting 提高优先级，盖过 auto-hide 及其 :hover 的 opacity） */
 .floating-paste-button.desktop.is-pasting,
 .floating-paste-button.desktop.is-pasting:hover,
-.mobile-paste-toolbar.is-pasting {
+.floating-paste-button.mobile.is-pasting {
   opacity: 0.5;
 }
 
@@ -3694,6 +3680,55 @@ export default {
   border-radius: 4px;
 }
 
+/* v21：移动端浮动粘贴按钮——右侧 56px 小方块，只有图标，可触摸拖动；
+   touch-action: none 让触摸拖动时页面不跟着滚动 */
+.floating-paste-button.mobile {
+  position: fixed;
+  z-index: 1000;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  cursor: move;
+}
+
+.floating-paste-button.mobile:active {
+  transform: scale(0.96);
+}
+
+.floating-paste-button.mobile .paste-button-content {
+  margin: 0;
+}
+
+/* 移动端按钮角上的 ×（取消剪贴板） */
+.floating-paste-button.mobile .paste-dismiss-btn {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+
 .shortcut-hint {
   background: rgba(255, 255, 255, 0.2);
   padding: 2px 6px;
@@ -3701,83 +3736,6 @@ export default {
   font-size: 10px;
   font-weight: normal;
   margin-left: auto;
-}
-
-/* 移动端底部粘贴工具栏 */
-.mobile-paste-toolbar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 10000;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  backdrop-filter: blur(10px);
-  border-top: 1px solid rgba(255, 255, 255, 0.2);
-  box-shadow: 0 -4px 20px rgba(102, 126, 234, 0.3);
-  animation: slideUpFromBottom 0.3s ease-out;
-}
-
-@keyframes slideUpFromBottom {
-  from {
-    transform: translateY(100%);
-    opacity: 0;
-  }
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
-}
-
-/* 当显示移动端粘贴工具栏时，给body添加底部padding */
-body:has(.mobile-paste-toolbar) {
-  padding-bottom: 70px;
-}
-
-/* 兼容不支持:has()的浏览器 */
-@supports not (selector(:has(.mobile-paste-toolbar))) {
-  .mobile-paste-toolbar ~ * {
-    margin-bottom: 70px;
-  }
-}
-
-.paste-toolbar-content {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  color: white;
-  cursor: pointer;
-}
-
-.paste-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex: 1;
-}
-
-.paste-text {
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.paste-close-btn {
-  background: rgba(255, 255, 255, 0.2);
-  border: none;
-  border-radius: 50%;
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.paste-close-btn:hover {
-  background: rgba(255, 255, 255, 0.3);
-  transform: scale(1.1);
 }
 
 /* 快捷键说明样式 */
