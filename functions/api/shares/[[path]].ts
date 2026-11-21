@@ -89,6 +89,8 @@ export async function onRequest(context) {
       maxDownloads,
       downloads: 0,
       createdBy: user.username,
+      // N8：绑定创建时这个文件（httpEtag）；文件被替换后旧链接失效。
+      etag: obj.httpEtag || null,
     };
     await saveShare(bucket, record);
     // replaceId：分享对话框改选项重新生成时，删掉上一条自己创建的记录，

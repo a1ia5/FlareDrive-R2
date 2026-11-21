@@ -1,6 +1,7 @@
 import { notFound, parseBucketPath } from "@/utils/bucket";
 import { get_auth_status, checkPathPermission, isInternalPath, isThumbnailKey, isSafeKey } from "@/utils/auth";
 import { deleteUnreferencedThumbnails } from "@/utils/thumbnails";
+import { deleteSharesForKeys } from "@/utils/shares";
 import { pickContentType } from "@/utils/response";
 import {isCrossOriginRequest, crossOriginRejectedResponse} from "@/utils/csrf";
 
@@ -28,6 +29,21 @@ export async function onRequestPostCreateMultipart(context) {
   if (!bucket) return notFound();
 
   const request: Request = context.request;
+
+  // N6：分片上传的冲突以前只在 complete 时才查（传完整文件才发现撞名）；
+  // 建分片的 POST 本来就带 If-None-Match: *（客户端 multipartUpload 把
+  // 调用方传的 headers 原样带上），这里先 head 一下，撞了直接 412，
+  // 省得传完所有分片才失败。complete 处的检查保留（create 与 complete
+  // 之间仍有竞态窗口，complete 是最后一道关）。
+  if ((request.headers.get("if-none-match") || "").trim() === "*") {
+    const existing = await bucket.head(path);
+    if (existing) {
+      return new Response(JSON.stringify({ error: "目标文件已存在" }), {
+        status: 412,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
 
   const customMetadata: Record<string, string> = {};
   const thumbnailHeader = request.headers.get("fd-thumbnail");
@@ -306,5 +322,7 @@ export async function onRequestDelete(context) {
 
   await bucket.delete(path);
   if (digest) await deleteUnreferencedThumbnails(bucket, [digest], [path]);
+  // N8：删文件时撤销指向它的分享（孤儿记录不留；链接本身已因 etag 比对失效）。
+  await deleteSharesForKeys(bucket, [path]);
   return new Response(null, { status: 204 });
 }

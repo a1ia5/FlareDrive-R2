@@ -1591,7 +1591,13 @@ export default {
           const res = await fetch(url, { headers });
           const data = await res.json();
           if (data.needLogin) {
-            // 需要登录 - 静默处理，不弹出登录框
+            // N9：带了凭据还被当成访客，说明存着的凭据已经失效（改了密码/
+            // 删了账户）——不清掉的话每次导航都按失败记一次数，5 次后 IP
+            // 被封 30 分钟，连正确密码都登不上。清掉本地凭据；needLogin
+            // 本身就会显示登录提示（不用另外弹框）。
+            if (savedCredentials) {
+              localStorage.removeItem('authCredentials');
+            }
             this.needLogin = true;
             this.isLoggedIn = false;
             this.isGuest = true;
@@ -2937,8 +2943,12 @@ export default {
       // F3：服务端撞名保护。每次尝试都发 If-None-Match: *（目标已存在时服务端
       // 返回 412，不覆盖）；412 时重新算一个名字再试，最多 3 次，仍撞就报错。
       // 缩略图是按内容摘要存的，与文件名无关，重试不用重新生成。
+      // N6：把每次试过的名字都记在 tried 里——used 每轮都从 this.files 重建，
+      // 只加当前名字会让重试撞回上轮刚撞过的名字（a.txt → a (1).txt → 又回
+      // 到 a (1).txt），明明 a (2).txt 空着却传失败。
       let uploaded = false;
       let lastError = null;
+      const tried = new Set();
       for (let attempt = 0; attempt < 3 && !uploaded; attempt++) {
         this.uploadFileName = uploadName;
         this.currentUpload = { basedir, name: uploadName };
@@ -2965,8 +2975,9 @@ export default {
         } catch (error) {
           lastError = error;
           if (error?.response?.status === 412 && attempt < 2) {
+            tried.add(uploadName);
             const used = new Set(this.files.map((f) => f.key.split('/').pop()));
-            used.add(uploadName);
+            for (const name of tried) used.add(name);
             for (const t of this.uploadQueue) {
               if (t.basedir === basedir) used.add(t.targetName || t.file.name);
             }

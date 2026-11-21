@@ -34,6 +34,7 @@ export interface ShareRecord {
   maxDownloads: number | null;
   downloads: number;
   createdBy: string;
+  etag: string | null; // N8：创建时目标文件的 httpEtag；老记录没有，跳过比对
 }
 
 export function createShareId(): string {
@@ -139,6 +140,7 @@ export async function loadShare(bucket: any, id: string): Promise<ShareRecord | 
       maxDownloads: typeof record.maxDownloads === "number" ? record.maxDownloads : null,
       downloads: typeof record.downloads === "number" ? record.downloads : 0,
       createdBy: typeof record.createdBy === "string" ? record.createdBy : "",
+      etag: typeof record.etag === "string" ? record.etag : null,
     };
   } catch {
     return null;
@@ -154,6 +156,22 @@ export async function saveShare(bucket: any, record: ShareRecord): Promise<void>
 export async function deleteShare(bucket: any, id: string): Promise<void> {
   const key = shareKeyForId(id);
   if (key) await bucket.delete(key);
+}
+
+// N8：删文件时顺带撤销指向它的分享——否则删完重建同名文件，旧链接
+// 虽然因 etag 比对打不开了，管理页里还挂着一条孤儿记录。尽力而为：
+// 列分享失败不影响删除本身。
+export async function deleteSharesForKeys(bucket: any, keys: string[]): Promise<void> {
+  if (keys.length === 0) return;
+  try {
+    const wanted = new Set(keys);
+    const all = await listShares(bucket);
+    for (const s of all) {
+      if (wanted.has(s.key)) await deleteShare(bucket, s.id);
+    }
+  } catch {
+    // 分享清理失败不影响删除本身
+  }
 }
 
 export async function listShares(bucket: any): Promise<ShareRecord[]> {
@@ -208,6 +226,16 @@ export async function checkShareAccess(env, bucket: any, id: string, request: Re
   }
   if (share.password && !(await hasValidSharePasswordToken(env, bucket, request, id))) {
     return { ok: false, status: 401, needsPassword: true };
+  }
+  // N8：分享绑定的是创建时那个文件，不只是 key——文件被删掉又在同名位置
+  // 建了个新文件，旧链接不能接着用。创建时把对象的 etag 存进记录，
+  // 这里比对；老分享（没存 etag）跳过检查，照常可用。
+  if (share.etag) {
+    const obj = await bucket.head(share.key);
+    if (!obj) return { ok: false, status: 404, message: "分享的文件已被删除" };
+    if (obj.httpEtag && obj.httpEtag !== share.etag) {
+      return { ok: false, status: 404, message: "分享的文件已被替换，请重新分享" };
+    }
   }
   return { ok: true, share };
 }

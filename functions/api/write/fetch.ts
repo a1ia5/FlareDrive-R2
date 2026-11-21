@@ -173,101 +173,132 @@ export async function onRequestPost(context) {
   const bucket = getBucket(context);
   if (!bucket) return json({ error: "存储桶未配置" }, 500);
 
-  let res: Response;
-  let finalUrl: URL;
-  try {
-    const fetched = await fetchFollowingRedirects(check.url, selfHost);
-    if ("error" in fetched) return json({ error: fetched.error }, 400);
-    res = fetched.res;
-    finalUrl = fetched.finalUrl;
-  } catch (e) {
-    return json({ error: "无法连接到目标地址" }, 502);
-  }
-  if (!res.ok || !res.body) {
-    return json({ error: `目标地址返回了 HTTP ${res.status}` }, 502);
-  }
-
-  const requested = typeof body.filename === "string" ? sanitizeFilename(body.filename) : "";
-  const filename = requested || filenameFromResponse(finalUrl, res.headers.get("Content-Disposition"));
-  if (!isSafeKey(dir + filename) || filename === FOLDER_MARKER) return json({ error: "文件名无效" }, 400);
-
-  // 同名文件已存在时不覆盖，改名为 "name (1).ext"
-  let key = dir + filename;
-  for (let n = 1; n <= 50 && (await bucket.head(key)); n++) {
-    const dot = filename.lastIndexOf(".");
-    key = dot > 0
-      ? `${dir}${filename.slice(0, dot)} (${n})${filename.slice(dot)}`
-      : `${dir}${filename} (${n})`;
-  }
-  if (!(await checkPathPermission(context, key, true))) return json({ error: "没有该目录的写入权限" }, 401);
-
+  // F10d：free-name 循环是先 head 再 put，中间有竞态窗口——两个离线下载
+  // 同时下同一个 URL 时，后到的 put 会静默覆盖先到的文件。put 加 onlyIf
+  //（目标已存在时返回 null 不覆盖），撞了就换下一个名字重下（最多 3 次；
+  // 流只能读一次，所以每次重试都重新抓一次 URL）。
   const maxBytes = Math.max(1, parseInt(context.env["FETCH_MAX_SIZE"] || "", 10) || DEFAULT_MAX_BYTES);
-  const lengthHeader = res.headers.get("Content-Length");
-  const length = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? parseInt(lengthHeader, 10) : null;
-  const encoded = !!res.headers.get("Content-Encoding"); // 压缩过的响应，Content-Length 不是解压后的长度
-
-  if (length !== null && length > maxBytes) {
-    return json({ error: `文件过大（${length} 字节），上限为 ${maxBytes} 字节` }, 413);
-  }
-
-  // 下载站返回的 Content-Type 经常不准（例如把视频标成 text/plain），
-  // 后缀能识别时以后缀为准，预览和缩略图都依赖这个类型。
-  const contentType = guessContentType(key) || pickContentType(res.headers.get("Content-Type"), key);
-  const options = { httpMetadata: contentType ? { contentType } : undefined };
-
-  try {
-    let object;
-    if (length !== null && !encoded) {
-      // 已知长度：边下边写，不占内存。M2：流也要逐字节计数——只靠声明的
-      // Content-Length 拦不住谎报长度的服务端（声明小、实际多发）。
-      let sizeExceeded = false;
-      let total = 0;
-      const counted = res.body.pipeThrough(
-        new TransformStream({
-          transform(chunk, controller) {
-            total += chunk.byteLength;
-            if (total > maxBytes) {
-              sizeExceeded = true;
-              controller.error(new Error("size"));
-            } else {
-              controller.enqueue(chunk);
-            }
-          },
-        })
-      );
-      try {
-        object = await bucket.put(key, counted, options);
-      } catch (e) {
-        if (sizeExceeded) return json({ error: `文件过大，上限为 ${maxBytes} 字节` }, 413);
-        throw e;
-      }
-    } else {
-      // 未知长度：R2 的流式写入要求事先知道长度，只能先读进内存，所以上限小得多
-      const limit = Math.min(maxBytes, MAX_BUFFERED_BYTES);
-      const reader = res.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.byteLength;
-        if (total > limit) {
-          await reader.cancel();
-          return json({ error: `目标地址没有提供文件大小，这种情况下最多只能下载 ${limit} 字节` }, 413);
-        }
-        chunks.push(value);
-      }
-      const buffer = new Uint8Array(total);
-      let offset = 0;
-      for (const c of chunks) {
-        buffer.set(c, offset);
-        offset += c.byteLength;
-      }
-      object = await bucket.put(key, buffer, options);
+  let nameIndex = 0; // 0 = 原名，1 = "name (1).ext"，……
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let res: Response;
+    let finalUrl: URL;
+    try {
+      const fetched = await fetchFollowingRedirects(check.url, selfHost);
+      if ("error" in fetched) return json({ error: fetched.error }, 400);
+      res = fetched.res;
+      finalUrl = fetched.finalUrl;
+    } catch (e) {
+      return json({ error: "无法连接到目标地址" }, 502);
     }
-    return json({ key: object.key, size: object.size, contentType: contentType || null });
-  } catch (e) {
-    console.error("fetch-url save failed:", e);
-    return json({ error: "保存文件失败，下载可能中途中断" }, 502);
+    if (!res.ok || !res.body) {
+      return json({ error: `目标地址返回了 HTTP ${res.status}` }, 502);
+    }
+
+    const requested = typeof body.filename === "string" ? sanitizeFilename(body.filename) : "";
+    const filename = requested || filenameFromResponse(finalUrl, res.headers.get("Content-Disposition"));
+    if (!isSafeKey(dir + filename) || filename === FOLDER_MARKER) return json({ error: "文件名无效" }, 400);
+
+    // 同名文件已存在时不覆盖，改名为 "name (1).ext"（从上次撞过的位置接着找）
+    const keyForIndex = (i: number): string => {
+      if (i === 0) return dir + filename;
+      const dot = filename.lastIndexOf(".");
+      return dot > 0
+        ? `${dir}${filename.slice(0, dot)} (${i})${filename.slice(dot)}`
+        : `${dir}${filename} (${i})`;
+    };
+    let idx = nameIndex;
+    let key = keyForIndex(idx);
+    while (idx <= 50 && (await bucket.head(key))) {
+      idx++;
+      key = keyForIndex(idx);
+    }
+    if (idx > 50) return json({ error: "同名文件过多，请先清理目录" }, 409);
+    if (!(await checkPathPermission(context, key, true))) return json({ error: "没有该目录的写入权限" }, 401);
+
+    const lengthHeader = res.headers.get("Content-Length");
+    const length = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? parseInt(lengthHeader, 10) : null;
+    const encoded = !!res.headers.get("Content-Encoding"); // 压缩过的响应，Content-Length 不是解压后的长度
+
+    if (length !== null && length > maxBytes) {
+      return json({ error: `文件过大（${length} 字节），上限为 ${maxBytes} 字节` }, 413);
+    }
+
+    // 下载站返回的 Content-Type 经常不准（例如把视频标成 text/plain），
+    // 后缀能识别时以后缀为准，预览和缩略图都依赖这个类型。
+    const contentType = guessContentType(key) || pickContentType(res.headers.get("Content-Type"), key);
+    // F10d：onlyIf 让 put 变成原子"不存在才写"；撞了返回 null，不覆盖。
+    const options = {
+      httpMetadata: contentType ? { contentType } : undefined,
+      onlyIf: { etagDoesNotMatch: "*" },
+    };
+
+    try {
+      let object = null;
+      if (length !== null && !encoded) {
+        // 已知长度：边下边写，不占内存。M2：流也要逐字节计数——只靠声明的
+        // Content-Length 拦不住谎报长度的服务端（声明小、实际多发）。
+        let sizeExceeded = false;
+        let total = 0;
+        const counted = res.body.pipeThrough(
+          new TransformStream({
+            transform(chunk, controller) {
+              total += chunk.byteLength;
+              if (total > maxBytes) {
+                sizeExceeded = true;
+                controller.error(new Error("size"));
+              } else {
+                controller.enqueue(chunk);
+              }
+            },
+          })
+        );
+        try {
+          // F10c：R2 的流式 put 要求事先知道长度——pipeThrough 出来的流没有
+          // 长度，线上直接 502（已实测：带 Content-Length 的离线下载两次
+          // 502，不带 Content-Length 的走内存缓冲，能成功）。包一层
+          // FixedLengthStream(length) 把长度告诉 R2；服务端谎报长度时
+          //（多发/少发）这里会直接报错，下载失败而不是存一个错文件。
+          // FixedLengthStream 是 Workers 运行时自带的；Node 测试环境没有，
+          // 那里直接用 counted（mock R2 不校验流长度）。
+          const stream = typeof FixedLengthStream !== "undefined"
+            ? counted.pipeThrough(new FixedLengthStream(length))
+            : counted;
+          object = await bucket.put(key, stream, options);
+        } catch (e) {
+          if (sizeExceeded) return json({ error: `文件过大，上限为 ${maxBytes} 字节` }, 413);
+          throw e;
+        }
+      } else {
+        // 未知长度：R2 的流式写入要求事先知道长度，只能先读进内存，所以上限小得多
+        const limit = Math.min(maxBytes, MAX_BUFFERED_BYTES);
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (total > limit) {
+            await reader.cancel();
+            return json({ error: `目标地址没有提供文件大小，这种情况下最多只能下载 ${limit} 字节` }, 413);
+          }
+          chunks.push(value);
+        }
+        const buffer = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) {
+          buffer.set(c, offset);
+          offset += c.byteLength;
+        }
+        object = await bucket.put(key, buffer, options);
+      }
+      if (object) return json({ key: object.key, size: object.size, contentType: contentType || null });
+      // put 返回 null：head 与 put 之间有人抢先建了同名文件，换下一个名字重下。
+      nameIndex = idx + 1;
+    } catch (e) {
+      console.error("fetch-url save failed:", e);
+      return json({ error: "保存文件失败，下载可能中途中断" }, 502);
+    }
   }
+  return json({ error: "目标文件已存在，请稍后重试" }, 409);
 }

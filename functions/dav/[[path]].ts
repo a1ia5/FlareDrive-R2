@@ -26,6 +26,7 @@ import {
 import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 import { applyObjectSecurityHeaders, formatContentRange, pickContentType } from "@/utils/response";
 import { deleteUnreferencedThumbnails } from "@/utils/thumbnails";
+import { deleteSharesForKeys } from "@/utils/shares";
 import { encodeKeyForUrl } from "@/utils/signing";
 
 const DAV_BASE = "/dav/";
@@ -285,6 +286,8 @@ async function deleteResource(context, bucket, user: UserInfo, path: string, wan
     await bucket.delete(path);
     // 删缩略图是尽力而为：摘要被其他文件共享时不删，清理失败也不影响 204。
     if (digest) await deleteUnreferencedThumbnails(bucket, [digest], [path]);
+    // N8：删文件时撤销指向它的分享（见 items DELETE）。
+    await deleteSharesForKeys(bucket, [path]);
     return text(204);
   }
 
@@ -297,6 +300,8 @@ async function deleteResource(context, bucket, user: UserInfo, path: string, wan
   if (truncated) return text(507, "目录过大，无法完整删除，请分批操作");
   await deleteKeys(bucket, keys);
   await deleteUnreferencedThumbnails(bucket, digests, keys);
+  // N8：删目录时撤销指向其中文件的分享（见 items DELETE）。
+  await deleteSharesForKeys(bucket, keys);
   return text(204);
 }
 

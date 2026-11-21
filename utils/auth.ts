@@ -1,5 +1,5 @@
 import { verifyD1Credentials, hasD1 } from "./d1auth";
-import { getClientIP, checkAuthLimit, recordAuthFailure } from "./login-limit";
+import { getClientIP, checkAuthLimit, recordAuthFailure, clearAuthLimit, LOGIN_LIMIT_CONFIG } from "./login-limit";
 
 // ---------------------------------------------------------------------------
 // 权限模型（所有接口共用这一套，不要在各个接口里再各写一份）
@@ -193,7 +193,15 @@ export async function authenticateBasic(context, account: string): Promise<UserI
         return null;
     }
     const info = await resolveAccount(account, context);
-    if (info.exists) return info;
+    if (info.exists) {
+        // N9：登录成功时把失败计数清掉——否则一次输错密码留下的计数会
+        // 一直挂着，下次再错几次就封 IP。只在确实有计数记录时才写 KV
+        //（remainingAttempts < 最大值），平时成功登录不产生额外 KV 写。
+        if (limit.remainingAttempts !== undefined && limit.remainingAttempts < LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS) {
+            await clearAuthLimit(context.env, username, clientIP);
+        }
+        return info;
+    }
     await recordAuthFailure(context.env, username, clientIP);
     return null;
 }
