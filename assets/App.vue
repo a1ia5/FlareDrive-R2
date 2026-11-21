@@ -189,7 +189,7 @@
             { text: '按照名称排序A-Z' },
             { text: '按照大小递增排序' },
             { text: '按照大小递减排序' },
-            { text: '粘贴文件到此目录', disabled: !clipboard || !canWrite || !canWriteHere },
+            { text: '粘贴文件到此目录', disabled: !clipboard || !canWrite || !canWriteHere || isPasting },
             { text: '管理分享链接', disabled: !isLoggedIn || isReadOnlyUser }
           ]"
           @click="onMenuClick" />
@@ -440,7 +440,7 @@
           </button>
         </li>
         <li v-if="clipboard && canWrite">
-          <button @click="pasteFile()">
+          <button @click="pasteFile()" :disabled="isPasting">
             <span>粘贴</span>
           </button>
         </li>
@@ -482,7 +482,7 @@
           </button>
         </li>
         <li v-if="clipboard && canWrite">
-          <button @click="pasteFile()">
+          <button @click="pasteFile()" :disabled="isPasting">
             <span>粘贴</span>
           </button>
         </li>
@@ -657,7 +657,7 @@
     <div
       v-if="clipboard && canWrite && canWriteHere && !isMobile"
       class="floating-paste-button desktop"
-      :class="{ 'auto-hide': !isNearPasteButton }"
+      :class="{ 'auto-hide': !isNearPasteButton, 'is-pasting': isPasting }"
       :style="{ left: pasteButtonPosition.x + 'px', top: pasteButtonPosition.y + 'px' }"
       @mousedown="startDragPasteButton"
       @click="handlePasteButtonClick"
@@ -681,6 +681,7 @@
     <div
       v-if="clipboard && canWrite && canWriteHere && isMobile"
       class="mobile-paste-toolbar"
+      :class="{ 'is-pasting': isPasting }"
     >
       <div class="paste-toolbar-content" @click="handlePasteButtonClick">
         <div class="paste-info">
@@ -838,6 +839,7 @@ export default {
     uploadFileName: '', // 进度条当前对应的文件名（上传队列按文件显示，避免百分比乱跳）
     uploadQueue: [],
     currentUpload: null, // F3：正在传的文件 { basedir, name }，已不在队列里；uploadFiles 算撞名时把它也算进去
+    isPasting: false, // v20：粘贴进行中（移动/复制/文件夹传输）；为 true 时所有粘贴入口都置灰/忽略
     backgroundImageUrl: "/assets/bg-cat.webp",
     needLogin: false,
     isGuest: true, // 默认为游客状态
@@ -2651,6 +2653,8 @@ export default {
     },
 
     async pasteFile() {
+      // v20 防重入：粘贴进行中时，按钮、菜单、Ctrl+V 再触发都直接忽略
+      if (this.isPasting) return;
       if (!this.clipboard) return;
 
       // 写权限：以当前目录的查权限结果为准（导航时查过；后端仍会兜底报 401/403）
@@ -2666,6 +2670,10 @@ export default {
       const verb = isCut ? '移动' : '粘贴';
       const items = Array.isArray(this.clipboard) ? [...this.clipboard] : [this.clipboard];
 
+      // v20：从这里起进入执行阶段（后面的确认框、改名输入框都是 await，
+      // 标志必须在它们之前就置上，否则连点会在弹框期间溜进来第二遍）；
+      // 标志在 finally 里清除，任何提前返回/报错都不会卡住
+      this.isPasting = true;
       try {
         // 目标目录现有名称（粘贴目标就是当前目录；文件为名，文件夹为名+'/'）。
         // 以当前列表为准：导航后 fetchFiles 已刷新；若列表过期，极少数情况下撞名可能漏判，
@@ -2859,6 +2867,8 @@ export default {
 
         console.error('粘贴文件失败:', error);
         this.showCustomToast('粘贴文件失败: ' + (error.message || '未知错误'), 'error');
+      } finally {
+        this.isPasting = false;
       }
     },
 
@@ -3652,6 +3662,14 @@ export default {
 .floating-paste-button.desktop.auto-hide:hover {
   opacity: 1;
   transform: scale(1) translateY(-3px);
+}
+
+/* v20：粘贴进行中，浮动按钮和移动端工具栏置灰（点击由 pasteFile 的 isPasting 关卡拦住；
+   桌面端用 .desktop.is-pasting 提高优先级，盖过 auto-hide 及其 :hover 的 opacity） */
+.floating-paste-button.desktop.is-pasting,
+.floating-paste-button.desktop.is-pasting:hover,
+.mobile-paste-toolbar.is-pasting {
+  opacity: 0.5;
 }
 
 /* 桌面端粘贴按钮内容 */
