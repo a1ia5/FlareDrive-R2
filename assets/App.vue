@@ -602,7 +602,7 @@
     <Dialog v-model="showSharesDialog">
       <div style="padding: 20px; width: 480px; max-width: 90vw;">
         <h3 style="margin: 0 0 8px 0;">管理分享链接</h3>
-        <p style="margin: 0 0 15px 0; color: #666; font-size: 13px;">下载次数按下载请求计数，预览不计入。撤销后链接立即失效。</p>
+        <p style="margin: 0 0 15px 0; color: #666; font-size: 13px;">下载次数按下载请求计数。撤销后链接立即失效。</p>
         <div v-if="sharesLoading" style="text-align: center; color: #666; padding: 10px 0;">加载中…</div>
         <div v-else-if="sharesError" style="color: #dc3545;" v-text="sharesError"></div>
         <div v-else-if="!sharesList.length" style="text-align: center; color: #666; padding: 10px 0;">暂无分享链接</div>
