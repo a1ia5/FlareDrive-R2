@@ -1,9 +1,13 @@
 // D1：公开分享页 /share/{id}。
 //
-//   GET  /share/{id}             分享页（文件名、大小、有效期、预览、下载按钮）
-//   GET  /share/{id}?preview=1  预览用的文件字节流（不计下载次数）
+//   GET  /share/{id}             分享页（文件名、大小、有效期、缩略图、下载按钮）
+//   GET  /share/{id}?thumb=1    缩略图 PNG（有缩略图的文件才有；不计下载次数）
 //   GET  /share/{id}?download=1 下载（计一次下载次数，Content-Disposition: attachment）
 //   POST /share/{id}             提交访问密码（表单 POST，密码不进 URL）
+//
+// v22：分享页不再放原文件预览，?preview=1 已删除——它直接暴露文件字节，
+// 且媒体预览不计下载次数，等于绕过 maxDownloads；有缩略图只放缩略图，
+// 没有缩略图的什么都不放。
 //
 // 所有检查（存在 / 过期 / 次数 / 密码）都集中在 utils/shares 的
 // checkShareAccess() 里，这里不重复写。密码验证通过后发一个 1 小时
@@ -21,6 +25,7 @@ import {
   sharePasswordCookieName,
   recordShareDownload,
 } from "@/utils/shares";
+import { thumbnailKeyForDigest } from "@/utils/thumbnails";
 
 function htmlEscape(s: string): string {
   return String(s ?? "")
@@ -40,7 +45,7 @@ function formatSize(size: number): string {
 }
 
 function page(title: string, body: string, status = 200): Response {
-  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${htmlEscape(title)} - FlareDrive 分享</title><style>body{font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px;color:#222}h1{font-size:20px;word-break:break-all}.meta{color:#666;font-size:14px;line-height:1.8}.btn{display:inline-block;margin-top:16px;padding:10px 24px;background:#007bff;color:#fff;text-decoration:none;border-radius:6px}.preview{max-width:100%;margin-top:16px}input{padding:8px;width:100%;box-sizing:border-box;margin:8px 0}button{padding:10px 24px;background:#007bff;color:#fff;border:none;border-radius:6px;cursor:pointer}.error{color:#dc3545}</style></head><body>${body}<p style="margin-top:32px;color:#999;font-size:13px">FlareDrive 分享 · 下载次数按下载请求计数，预览不计入</p></body></html>`;
+  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${htmlEscape(title)} - FlareDrive 分享</title><style>body{font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px;color:#222}h1{font-size:20px;word-break:break-all}.meta{color:#666;font-size:14px;line-height:1.8}.btn{display:inline-block;margin-top:16px;padding:10px 24px;background:#007bff;color:#fff;text-decoration:none;border-radius:6px}.preview{max-width:100%;margin-top:16px}input{padding:8px;width:100%;box-sizing:border-box;margin:8px 0}button{padding:10px 24px;background:#007bff;color:#fff;border:none;border-radius:6px;cursor:pointer}.error{color:#dc3545}</style></head><body>${body}<p style="margin-top:32px;color:#999;font-size:13px">FlareDrive 分享 · 下载次数按下载请求计数</p></body></html>`;
   return new Response(html, { status, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
@@ -112,32 +117,29 @@ export async function onRequestGet(context) {
     await recordShareDownload(bucket, share);
     return streamFile(context, share.key, true);
   }
-  if (url.searchParams.has("preview")) {
-    // F7：非媒体文件的预览就是一次完整下载（浏览器直接拿到整个文件），
-    // 计入下载次数，避免 maxDownloads 被预览绕过；图片/视频/音频的预览
-    // 只是分享页里的内联展示，不计。计数仍是读-改-写（并发下可能少计），
-    // 与下载分支一致，接受该竞态。
-    const obj = await bucket.head(share.key);
-    const type = obj?.httpMetadata?.contentType || "";
-    if (!type.startsWith("image/") && !type.startsWith("video/") && !type.startsWith("audio/")) {
-      await recordShareDownload(bucket, share);
-    }
-    return streamFile(context, share.key, false);
-  }
 
+  // v22：分享页不再放原文件预览。?preview=1 已删除（它直接暴露文件字节，
+  // 且媒体预览不计下载次数，等于绕过 maxDownloads）；旧的 ?preview=1
+  // 请求会落到下面的落地页渲染，只返回 HTML，不返回文件字节、不计下载。
   const obj = await bucket.head(share.key);
   if (!obj) return notFoundPage("分享的文件已被删除");
+  // 缩略图摘要存在文件的 customMetadata.thumbnail 里；没有摘要或摘要
+  // 非法时 thumbKey 为 null，落地页什么都不放。
+  const thumbKey = thumbnailKeyForDigest(obj.customMetadata?.thumbnail ?? "");
+
+  if (url.searchParams.has("thumb")) {
+    if (!thumbKey) return notFoundPage("该文件没有缩略图");
+    // 缩略图不计下载次数（它只是 144×144 的预览图，不是文件本身）。
+    return streamFile(context, thumbKey, false);
+  }
+
   const type = obj.httpMetadata?.contentType || "application/octet-stream";
   const size = obj.size;
 
-  let preview = "";
-  if (type.startsWith("image/")) {
-    preview = `<img class="preview" src="/share/${htmlEscape(id)}?preview=1" alt="">`;
-  } else if (type.startsWith("video/")) {
-    preview = `<video class="preview" src="/share/${htmlEscape(id)}?preview=1" controls preload="metadata"></video>`;
-  } else if (type.startsWith("audio/")) {
-    preview = `<audio class="preview" src="/share/${htmlEscape(id)}?preview=1" controls preload="metadata"></audio>`;
-  }
+  // 只有有缩略图的文件才放一张缩略图；没有缩略图的什么都不放。
+  const preview = thumbKey
+    ? `<img class="preview" src="/share/${htmlEscape(id)}?thumb=1" alt="">`
+    : "";
 
   // 分享页是服务端渲染：Worker 的默认时区是 UTC，而管理页在浏览器里按
   // 访客本地时区渲染（站主在东八区），不指定时区会差 8 小时。
