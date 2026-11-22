@@ -1,20 +1,49 @@
-// 登录 / Basic 认证的失败计数限流（KV：LOGIN_ATTEMPTS）。
+// 登录 / Basic 认证的失败计数限流。
 //
-// 原先只在 /api/auth/login 里计数，Basic 认证走其它接口（/api/*、/dav/、
-// /raw/）时可以无限试密码（F2）。现在把计数抽到这里共享：
-//   - login.ts（登录接口）：沿用原来的流程（先查限流 → 校验 → 失败记数 / 成功清零）。
-//   - utils/auth.ts 的 getRequestUser()：所有走 Basic 认证的接口都经过它，
-//     在校验前先查是否被封禁（被封禁直接返回 null，不做 PBKDF2），
-//     校验失败时记一次数。
-// KV 键格式与原来一致（login_limit:<用户名>:<IP>），ban-status / unban
-// 接口直接读同一个键，不用改。LOGIN_ATTEMPTS 未绑定时限流静默关闭
-// （只在日志里报一次），不阻塞登录——与原来行为一致。
+// v28（R3-2）：计数从 KV 搬到了 R2。KV 只有 read-modify-write，没有原子
+// 操作——30 个并行请求读到的都是旧计数，全放行。R2 的 put 支持 onlyIf
+// 条件写（etagMatches / etagDoesNotMatch "*"，v19 已在用），读→算→
+// 条件写 + 冲突重试就是一段 CAS，计数不会丢，并行 burst 里第 6 个请求
+// 读到的就是已封禁的状态。
+//
+// 关键流程（原来是"先查、后校验、失败再记数"，现在是"先原子认领、再校验"）：
+//   - 认领（claimAuthAttempt / claimSharePasswordAttempt）：把"这次尝试"
+//     原子地记一次数，并返回 verdict。已经封禁的直接返回不通过，不做
+//     PBKDF2；这次就是第 5 次的，返回 remainingAttempts = 0，调用方据
+//     此决定失败时返回 401 还是 429。
+//   - 成功后清零（clearAuthLimit / clearSharePasswordLimit）：认领已经
+//     把这次记了一次，成功必须清掉，否则成功请求也会把计数顶满然后把
+//     自己封掉。
+//   - 失败时不用再另记一次数（已经在认领时记过了）。
+//
+// 计数对象存在内部前缀 _$flaredrive$/login-limits/ 下（isInternalPath
+// 挡住所有读路径，见 utils/auth.ts）；键是逻辑键的 encodeURIComponent
+// （防 "/" 等字符坏 key）。记录沿用原来 KV 的 JSON 形状
+// { attempts, firstAttempt, lastAttempt, bannedUntil? }，ban-status 的
+// 解析不用改。
+//
+// 代价：每次认证都要先认领（一次 get + 一次条件 put），成功后再清掉
+// （一次 delete）。个人站点的量完全吃得下；换来的是并行 burst 也会被
+// 挡在 5 次。R2 出错或重试耗尽时 fail-open（只记一次日志），不阻塞认证。
+//
+// LOGIN_ATTEMPTS KV 不再使用（部署时若已绑，可以删掉；留着也无害）。
+// 注意：切换后 KV 里残留的封禁记录会被丢弃（封禁本来就只有 30 分钟）。
 
 export const LOGIN_LIMIT_CONFIG = {
   MAX_ATTEMPTS: 5, // 最大尝试次数
   BAN_DURATION: 30 * 60, // 封禁时长（秒），30分钟
   ATTEMPT_WINDOW: 60 * 60, // 尝试次数重置窗口（秒），1小时
 };
+
+// R2 条件写冲突时最多重试次数。每次重试都会重新读，burst 里每一轮
+// 至少有一个请求能写成功；8 次足够收敛（实测 30 并行也用不满）。
+const MAX_CAS_RETRIES = 8;
+
+const LIMIT_PREFIX = "_$flaredrive$/login-limits/";
+
+function limitObjectKey(logicalKey: string): string {
+  return LIMIT_PREFIX + encodeURIComponent(logicalKey) + ".json";
+}
 
 // 获取客户端IP地址
 export function getClientIP(request) {
@@ -26,180 +55,220 @@ export function getClientIP(request) {
   );
 }
 
-// LOGIN_ATTEMPTS 未绑定时限流是静默关闭的——在日志里大声报一次
-// （每个 isolate 只报一次，避免刷屏），并在 README 里列为必绑项。
-let warnedNoLoginAttemptsKv = false;
-function warnLoginLimitDisabled() {
-  if (warnedNoLoginAttemptsKv) return;
-  warnedNoLoginAttemptsKv = true;
-  console.error(
-    "[SECURITY] LOGIN_ATTEMPTS KV 未绑定，登录限流已关闭：同一账号/IP 可无限尝试密码。请在 Cloudflare Pages 设置里绑定 LOGIN_ATTEMPTS KV 命名空间。"
-  );
+// R2 本身出错 / 存储桶未绑定时限流 fail-open——在日志里大声报一次
+// （每个 isolate 只报一次，避免刷屏），不阻塞认证（与原来 N10 的
+// 处理一致：一次存储失败不能把所有认证请求都变成 500）。
+let warnedR2Error = false;
+function warnR2Error(error) {
+  if (warnedR2Error) return;
+  warnedR2Error = true;
+  console.error("[SECURITY] 登录限流存储出错，限流已临时关闭（fail-open）：", error);
 }
 
-// N10：KV 本身出错（配额、服务异常）时也要 fail-open，不能让一次 KV
-// 读失败把所有认证请求都变成 500。只报一次，避免出错期间刷屏。
-let warnedKvError = false;
-function warnKvError(error) {
-  if (warnedKvError) return;
-  warnedKvError = true;
-  console.error("[SECURITY] LOGIN_ATTEMPTS KV 出错，登录限流已临时关闭（fail-open）：", error);
+// CAS 重试耗尽（持续冲突）时 fail-open，同样只报一次。
+let warnedCasExhausted = false;
+function warnCasExhausted() {
+  if (warnedCasExhausted) return;
+  warnedCasExhausted = true;
+  console.error("[SECURITY] 登录限流 CAS 重试耗尽，限流已临时关闭（fail-open）：并行冲突过多");
 }
 
-// 检查用户是否被封禁（KV 键由调用方给：登录用 login_limit:<用户名>:<IP>，
-// 分享密码用 share_limit:<分享ID>:<IP>，见 F6）。
-export async function checkAuthLimit(env, username, clientIP) {
-  return checkLimitByKey(env, `login_limit:${username}:${clientIP}`);
+function failOpen() {
+  return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
 }
 
-async function checkLimitByKey(env, key) {
-  if (!env.LOGIN_ATTEMPTS) {
-    warnLoginLimitDisabled();
-    return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
-  }
+function bannedResponse(remainingBanTime: number) {
+  return {
+    allowed: false,
+    banned: true,
+    remainingBanTime,
+    message: `账户已被临时锁定，请在 ${Math.ceil(remainingBanTime / 60)} 分钟后重试`,
+  };
+}
 
-  let limitData;
+function lockedMessage() {
+  return `登录尝试次数过多，账户已被锁定 ${LOGIN_LIMIT_CONFIG.BAN_DURATION / 60} 分钟`;
+}
+
+// 条件写一次：obj 存在时按它的 etag 写，不存在时按"不存在"写。
+// 返回 { ok }；ok=false 且 error 为空表示条件没满足（别人先写了），
+// 调用方重读重试；error 非空表示 R2 本身出错，调用方 fail-open。
+async function casPut(bucket, r2key: string, next: any, obj: any) {
   try {
-    limitData = await env.LOGIN_ATTEMPTS.get(key);
-  } catch (error) {
-    // N10：KV 读失败时 fail-open，不阻塞认证（与"未绑定"同一处理）。
-    warnKvError(error);
-    return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
-  }
-
-  if (!limitData) {
-    return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
-  }
-
-  const data = JSON.parse(limitData);
-  const now = Math.floor(Date.now() / 1000);
-
-  // 检查是否在封禁期内
-  if (data.bannedUntil && now < data.bannedUntil) {
-    const remainingBanTime = data.bannedUntil - now;
-    return {
-      allowed: false,
-      banned: true,
-      remainingBanTime,
-      message: `账户已被临时锁定，请在 ${Math.ceil(remainingBanTime / 60)} 分钟后重试`,
-    };
-  }
-
-  // 检查尝试次数是否超限
-  if (data.attempts >= LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS) {
-    // 检查是否超过重置窗口
-    if (now - data.firstAttempt > LOGIN_LIMIT_CONFIG.ATTEMPT_WINDOW) {
-      // 重置计数（删失败也只影响下一次重算，不阻塞本次放行）
-      try {
-        await env.LOGIN_ATTEMPTS.delete(key);
-      } catch (error) {
-        warnKvError(error);
-      }
-      return { allowed: true, remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS };
+    const putOptions: any = { httpMetadata: { contentType: "application/json" } };
+    if (obj) {
+      if (!obj.httpEtag) return { ok: false, error: new Error("missing etag on limit record") };
+      putOptions.onlyIf = { etagMatches: obj.httpEtag };
     } else {
-      // 设置封禁
-      const bannedUntil = now + LOGIN_LIMIT_CONFIG.BAN_DURATION;
-      try {
-        await env.LOGIN_ATTEMPTS.put(
-          key,
-          JSON.stringify({
-            ...data,
-            bannedUntil,
-          }),
-          { expirationTtl: LOGIN_LIMIT_CONFIG.BAN_DURATION + 3600 }
-        );
-      } catch (error) {
-        // N10：封禁写不进去也按本次封禁返回（下次请求会重新算到这里，
-        // 不会因为一次写失败就放过攻击者）。
-        warnKvError(error);
-      }
+      putOptions.onlyIf = { etagDoesNotMatch: "*" };
+    }
+    const written = await bucket.put(r2key, JSON.stringify(next), putOptions);
+    return { ok: written !== null && written !== undefined };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
 
+// 核心：原子认领一次尝试。返回值沿用原来 checkAuthLimit 的形状：
+// allowed=false 表示已被封禁；allowed=true 时 remainingAttempts 是
+// 这次之后还剩的次数（0 表示这次就是第 5 次，封禁已经生效）。
+async function claimAttempt(bucket, logicalKey: string) {
+  if (!bucket) {
+    warnR2Error(new Error("no bucket bound"));
+    return failOpen();
+  }
+  const r2key = limitObjectKey(logicalKey);
+  const now = Math.floor(Date.now() / 1000);
+  for (let round = 0; round < MAX_CAS_RETRIES; round++) {
+    let obj = null;
+    let data = null;
+    try {
+      obj = await bucket.get(r2key);
+      if (obj) {
+        try {
+          data = JSON.parse(await obj.text());
+        } catch {
+          data = null; // 记录损坏：按空记录处理，下面会覆盖写掉
+        }
+      }
+    } catch (error) {
+      warnR2Error(error);
+      return failOpen();
+    }
+
+    if (!data || typeof data.attempts !== "number" || typeof data.firstAttempt !== "number") {
+      data = { attempts: 0, firstAttempt: now, lastAttempt: now };
+    }
+
+    // 先看封禁、再看窗口（顺序不能反：5 次尝试拖得久时，封禁可能比
+    // 1 小时窗口晚到期；先重置窗口会把还没到期的封禁提前放掉）。
+    if (data.bannedUntil && now < data.bannedUntil) {
+      return bannedResponse(data.bannedUntil - now);
+    }
+    if (now - data.firstAttempt > LOGIN_LIMIT_CONFIG.ATTEMPT_WINDOW) {
+      // 窗口过了：重新计数（旧记录就地覆盖，不用先删）。
+      data = { attempts: 0, firstAttempt: now, lastAttempt: now };
+    }
+
+    if (data.attempts >= LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS) {
+      // 已到上限但没写 bannedUntil（旧记录/脏数据）：现在就封禁。
+      const next = {
+        ...data,
+        attempts: data.attempts + 1,
+        lastAttempt: now,
+        bannedUntil: now + LOGIN_LIMIT_CONFIG.BAN_DURATION,
+      };
+      const written = await casPut(bucket, r2key, next, obj);
+      if (!written.ok) {
+        if (written.error) {
+          warnR2Error(written.error);
+          return failOpen();
+        }
+        continue; // 冲突：重读重试
+      }
       return {
         allowed: false,
         banned: true,
         remainingBanTime: LOGIN_LIMIT_CONFIG.BAN_DURATION,
-        message: `登录尝试次数过多，账户已被锁定 ${LOGIN_LIMIT_CONFIG.BAN_DURATION / 60} 分钟`,
+        message: lockedMessage(),
       };
     }
-  }
 
-  return {
-    allowed: true,
-    remainingAttempts: LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS - data.attempts,
-  };
-}
-
-// 记录一次认证失败
-export async function recordAuthFailure(env, username, clientIP) {
-  return recordFailureByKey(env, `login_limit:${username}:${clientIP}`);
-}
-
-async function recordFailureByKey(env, key) {
-  if (!env.LOGIN_ATTEMPTS) {
-    return;
-  }
-
-  let limitData;
-  try {
-    limitData = await env.LOGIN_ATTEMPTS.get(key);
-  } catch (error) {
-    // N10：读不到旧计数就不记这次（fail-open），不要覆盖掉已有记录。
-    warnKvError(error);
-    return;
-  }
-  const now = Math.floor(Date.now() / 1000);
-
-  let data;
-  if (limitData) {
-    data = JSON.parse(limitData);
-    // 如果超过重置窗口，重新开始计数
-    if (now - data.firstAttempt > LOGIN_LIMIT_CONFIG.ATTEMPT_WINDOW) {
-      data = { attempts: 1, firstAttempt: now, lastAttempt: now };
-    } else {
-      data.attempts += 1;
-      data.lastAttempt = now;
+    const next = { ...data, attempts: data.attempts + 1, lastAttempt: now };
+    if (next.attempts >= LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS) {
+      next.bannedUntil = now + LOGIN_LIMIT_CONFIG.BAN_DURATION;
     }
-  } else {
-    data = { attempts: 1, firstAttempt: now, lastAttempt: now };
+    const written = await casPut(bucket, r2key, next, obj);
+    if (!written.ok) {
+      if (written.error) {
+        warnR2Error(written.error);
+        return failOpen();
+      }
+      continue; // 冲突：重读重试
+    }
+    const remainingAttempts = Math.max(0, LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS - next.attempts);
+    return {
+      allowed: true,
+      remainingAttempts,
+      ...(next.attempts >= LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS
+        ? { remainingBanTime: LOGIN_LIMIT_CONFIG.BAN_DURATION, message: lockedMessage() }
+        : {}),
+    };
   }
+  warnCasExhausted();
+  return failOpen();
+}
 
-  // 设置过期时间为封禁时长 + 1小时的缓冲
-  const ttl = LOGIN_LIMIT_CONFIG.BAN_DURATION + 3600;
+// 认领一次登录尝试（登录接口、authenticateBasic 共用）。
+export async function claimAuthAttempt(bucket, username, clientIP) {
+  return claimAttempt(bucket, `login_limit:${username}:${clientIP}`);
+}
+
+// 登录成功时清掉计数记录（认领已经把这次记了一次，必须清）。
+export async function clearAuthLimit(bucket, username, clientIP) {
+  if (!bucket) return;
   try {
-    await env.LOGIN_ATTEMPTS.put(key, JSON.stringify(data), { expirationTtl: ttl });
+    await bucket.delete(limitObjectKey(`login_limit:${username}:${clientIP}`));
   } catch (error) {
-    // N10：写失败就丢这次计数（fail-open），下次请求重新读。
-    warnKvError(error);
+    warnR2Error(error);
   }
 }
 
-// 清除登录限制记录（登录成功时调用）
-export async function clearAuthLimit(env, username, clientIP) {
-  if (!env.LOGIN_ATTEMPTS) {
-    return;
-  }
-
-  const key = `login_limit:${username}:${clientIP}`;
+// 读出计数记录（ban-status 用；没有记录返回 null）。
+export async function getLimitState(bucket, username, clientIP) {
+  if (!bucket) return null;
   try {
-    await env.LOGIN_ATTEMPTS.delete(key);
+    const obj = await bucket.get(limitObjectKey(`login_limit:${username}:${clientIP}`));
+    if (!obj) return null;
+    const data = JSON.parse(await obj.text());
+    if (!data || typeof data.attempts !== "number") return null;
+    return data;
   } catch (error) {
-    // N10：删失败不影响登录成功本身，记录靠 TTL 自然过期。
-    warnKvError(error);
+    warnR2Error(error);
+    return null;
   }
+}
+
+// 解封一个用户在所有 IP 上的限制（R2 可以按前缀 list，KV 做不到）。
+// 返回删掉的条数。
+export async function clearAllAuthLimitsForUser(bucket, username) {
+  if (!bucket) return 0;
+  const prefix = LIMIT_PREFIX + encodeURIComponent(`login_limit:${username}:`);
+  let count = 0;
+  try {
+    let cursor: string | undefined = undefined;
+    for (let page = 0; page < 20; page++) {
+      const list = await bucket.list({ prefix, cursor });
+      for (const o of list.objects || []) {
+        await bucket.delete(o.key);
+        count++;
+      }
+      if (!list.truncated) break;
+      cursor = list.cursor;
+    }
+  } catch (error) {
+    warnR2Error(error);
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------
-// F6：分享访问密码的试错限流（与登录限流共用同一套 KV 和阈值，键不同）。
+// F6：分享访问密码的试错限流（与登录限流同一套 R2 存储和阈值，键不同）。
 // 分享 ID 是 10 位随机字符，猜不到；但拿到链接的人可以无限试密码。
-// 键：share_limit:<分享ID>:<IP>。LOGIN_ATTEMPTS 未绑定时不限流（fail-open）。
+// 键：share_limit:<分享ID>:<IP>。
 // ---------------------------------------------------------------------------
 
-// 检查该分享的密码是否已被封禁
-export async function checkSharePasswordLimit(env, shareId, clientIP) {
-  return checkLimitByKey(env, `share_limit:${shareId}:${clientIP}`);
+// 认领一次分享密码尝试。
+export async function claimSharePasswordAttempt(bucket, shareId, clientIP) {
+  return claimAttempt(bucket, `share_limit:${shareId}:${clientIP}`);
 }
 
-// 记录一次分享密码错误
-export async function recordSharePasswordFailure(env, shareId, clientIP) {
-  return recordFailureByKey(env, `share_limit:${shareId}:${clientIP}`);
+// 分享密码验证通过时清掉计数记录（与登录成功清零同理）。
+export async function clearSharePasswordLimit(bucket, shareId, clientIP) {
+  if (!bucket) return;
+  try {
+    await bucket.delete(limitObjectKey(`share_limit:${shareId}:${clientIP}`));
+  } catch (error) {
+    warnR2Error(error);
+  }
 }

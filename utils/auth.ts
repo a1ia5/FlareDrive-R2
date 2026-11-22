@@ -1,5 +1,6 @@
 import { verifyD1Credentials, hasD1 } from "./d1auth";
-import { getClientIP, checkAuthLimit, recordAuthFailure, clearAuthLimit, LOGIN_LIMIT_CONFIG } from "./login-limit";
+import { getBucket } from "./bucket";
+import { getClientIP, claimAuthAttempt, clearAuthLimit, LOGIN_LIMIT_CONFIG } from "./login-limit";
 
 // ---------------------------------------------------------------------------
 // 权限模型（所有接口共用这一套，不要在各个接口里再各写一份）
@@ -178,7 +179,7 @@ export async function resolveAccount(account: string, context): Promise<UserInfo
 }
 
 // N2：供那些自己解析 Basic 头、不走 getRequestUser 的接口使用——
-// 与 getRequestUser 完全相同的限流逻辑：先查封禁，再校验，失败计数。
+// 与 getRequestUser 完全相同的限流逻辑：先原子认领一次尝试，再校验。
 // 返回 null 表示未登录/密码错/已被封禁（调用方统一按 401/403 处理，
 // 不区分原因，避免泄露"密码错"还是"被封禁"）。
 // login.ts 不用它（登录接口成功时要清零，且被封禁时返回 429）。
@@ -187,33 +188,33 @@ export async function authenticateBasic(context, account: string): Promise<UserI
     const username = account.split(":")[0];
     if (!username) return null;
     const clientIP = getClientIP(context.request);
-    const limit = await checkAuthLimit(context.env, username, clientIP);
+    // R3-2：认领在校验之前做，而且是原子的（R2 条件写 CAS）——并行猜
+    // 密码时，第 6 个请求读到的就是已封禁的状态，不会全放行。失败不用
+    // 再另记一次数（已经在认领时记过了）。
+    const bucket = getBucket(context);
+    const limit = await claimAuthAttempt(bucket, username, clientIP);
     if (!limit.allowed) {
         context.__fdAuthBanned = true;
         return null;
     }
     const info = await resolveAccount(account, context);
     if (info.exists) {
-        // N9：登录成功时把失败计数清掉——否则一次输错密码留下的计数会
-        // 一直挂着，下次再错几次就封 IP。只在确实有计数记录时才写 KV
-        //（remainingAttempts < 最大值），平时成功登录不产生额外 KV 写。
-        if (limit.remainingAttempts !== undefined && limit.remainingAttempts < LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS) {
-            await clearAuthLimit(context.env, username, clientIP);
-        }
+        // 认领已经把这次尝试记了一次；登录成功就清掉，否则成功请求
+        // 也会把计数顶满然后把自己封掉。
+        await clearAuthLimit(bucket, username, clientIP);
         return info;
     }
-    await recordAuthFailure(context.env, username, clientIP);
     return null;
 }
 
 // 从请求的 Authorization: Basic 头解析出已通过校验的账户；没有或无效时返回 null。
 // 同一个请求内多次调用只校验一次。
 // F2：所有走 Basic 认证的接口都经过这里，所以限流也在这里执行——
-// 校验前先查该账号/IP 是否被封禁（被封禁直接返回 null，不做 PBKDF2，
-// 攻击者也无法从 401 区分"密码错"和"已被封禁"）；校验失败记一次数。
-// 注意：这里只记失败、不清零（成功清零只在登录接口做，见 login.ts；
-// 失败记录靠 KV 的 TTL 自然过期）。被封禁时在 context 上打标记，供
-// 需要返回 429 的调用方区分（多数接口直接按未登录返回 401 即可）。
+// 校验前先原子认领一次尝试（R3-2：R2 条件写 CAS，并行 burst 也会被挡
+// 在 5 次）；被封禁直接返回 null，不做 PBKDF2，攻击者也无法从 401
+// 区分"密码错"和"已被封禁"。成功时清零（认领已经记了一次，不清会
+// 把成功请求也算进计数）；失败不用另记。
+// 被封禁时在 context 上打标记，供需要返回 429 的调用方区分（多数接口直接按未登录返回 401 即可）。
 export async function getRequestUser(context): Promise<UserInfo | null> {
     if (context.__fdUser !== undefined) return context.__fdUser;
 
