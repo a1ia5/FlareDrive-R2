@@ -33,7 +33,14 @@ export async function onRequestGet(context) {
     const authResult = await get_list_auth_status(context, path);
     if (!authResult.hasAccess) {
       // 200 + needLogin：不带 WWW-Authenticate，避免弹出浏览器原生登录框
-      return json({ needLogin: true, message: "需要登录才能查看文件列表" });
+      // R3-3：needLogin 不只代表凭据错——有合法登录但无权进该目录时也
+      // 返回 needLogin。前端只在凭据确实错了时才清本地凭据（badCredentials
+      // 为真时才清），否则一个 ?p=<无权目录> 的链接会把正常用户登出；
+      // 被封时也不清，封禁解除后凭据还能用。
+      const authHeader = context.request.headers.get("Authorization") || "";
+      const badCredentials =
+        /^Basic /i.test(authHeader) && !authResult.user && !context.__fdAuthBanned;
+      return json({ needLogin: true, badCredentials, message: "需要登录才能查看文件列表" });
     }
     const user = authResult.user;
     const env = context.env;

@@ -10,7 +10,10 @@ const MAX_REDIRECTS = 5;
 // D3：默认上限从 1 GiB 降到 256 MiB——1 GiB 的文件走 Worker 流式下载很容易
 // 超时，用户的实际文件都不大；需要更大时用 FETCH_MAX_SIZE 环境变量调高。
 const DEFAULT_MAX_BYTES = 256 * 1024 * 1024; // 256 MiB
-const MAX_BUFFERED_BYTES = 64 * 1024 * 1024; // 响应没有 Content-Length 时只能读进内存
+const MAX_BUFFERED_BYTES = 32 * 1024 * 1024; // 响应没有 Content-Length 时只能读进内存
+// R3-7b：原来是 64 MiB——缓冲时 chunks 占 64 MiB，再拷进一个同样大小的
+// Uint8Array，峰值约 128 MiB，正好顶着 Worker 128 MB 的内存上限，55–64 MiB
+// 的无长度响应会直接崩掉而不是干净地返回 413。降到 32 MiB 后峰值约 64 MiB。
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -63,11 +66,15 @@ export function checkTargetUrl(raw: string, selfHost: string): { ok: true; url: 
   }
 
   // IPv6 字面量：回环、未指定、ULA、链路本地、IPv4 映射一律拒绝
+  // R3-7a：补上 IPv4 兼容地址 ::a.b.c.d（URL 解析后规范化为 ::7f00:1 形
+  // 式）、6to4（2002::/16）和 Teredo（2001::/32，解析后形如 2001::1）。
   if (host.includes(":")) {
     if (
       host === "::" || host === "::1" ||
+      host.startsWith("::") ||
       /^f[cd]/.test(host) || /^fe[89ab]/.test(host) ||
-      host.startsWith("::ffff:") || host.startsWith("64:ff9b:")
+      host.startsWith("::ffff:") || host.startsWith("64:ff9b:") ||
+      /^2002:/.test(host) || /^2001:0?:/.test(host)
     ) {
       return { ok: false, reason: "不允许访问内部地址" };
     }

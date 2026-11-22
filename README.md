@@ -234,9 +234,9 @@ curl -u "alice:$FLARE_PASS" -X PUT \
 | `/api/auth/check-write-permission` | POST | 查询某目录是否可写 | 公开（只返回是否） |
 | `/api/children/<目录>` | GET | 列目录，同时返回应用内签名令牌 | 读 |
 | `/api/sign` | POST | 生成分享链接 | 读 |
-| `/api/shares` | POST / GET | 创建 / 列出有状态分享链接 | 读（列出只看自己的，管理员看全部） |
+| `/api/shares` | POST / GET | 创建 / 列出有状态分享链接 | 读（列出自己能读的分享） |
 | `/api/shares/<id>` | DELETE | 撤销分享链接 | 创建者或管理员 |
-| `/share/<id>` | GET / POST | 公开分享页（预览 + 下载；POST 提交访问密码） | 分享有效且密码正确 |
+| `/share/<id>` | GET / POST | 公开分享页（缩略图 + 下载；POST 提交访问密码） | 分享有效且密码正确 |
 | `/api/zip?dir=<目录>` | GET | 文件夹打包成 ZIP 下载（流式，不压缩；上限 100 个文件 / 200 MB） | 读（或目录令牌） |
 | `/api/write/items/<路径>` | PUT / POST / DELETE | 上传、分片上传、删除、复制（`x-amz-copy-source`）、`?fixMetadata` | 写 |
 | `/api/write/fetch` | POST | 离线下载 | 写 |

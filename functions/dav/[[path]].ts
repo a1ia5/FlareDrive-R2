@@ -367,16 +367,18 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
   const srcPrefix = path + "/";
   const dstPrefix = to + "/";
 
-  if (isDir && (dstPrefix.startsWith(srcPrefix) || srcPrefix.startsWith(dstPrefix))) {
-    return text(403, "不能把目录复制或移动到它自己的上级或下级目录");
-  }
-
   // 权限：COPY 需要源的读权限，MOVE 需要源的写权限；目标都需要写权限。
   // N5：无权限也返回 404（而不是 403），不透露源或目标是否存在。
+  // R3-6：权限检查必须在祖先检查之前——否则 403 会告诉无权用户该目录
+  // 存在（存在返回 403，不存在返回 404）。
   const srcCheck = isDir ? srcPrefix : path;
   const srcOk = move ? userCanWrite(user, env, srcCheck) : userCanRead(user, env, srcCheck);
   const dstOk = userCanWrite(user, env, isDir ? dstPrefix : to);
   if (!srcOk || !dstOk) return text(404, "Not found");
+
+  if (isDir && (dstPrefix.startsWith(srcPrefix) || srcPrefix.startsWith(dstPrefix))) {
+    return text(403, "不能把目录复制或移动到它自己的上级或下级目录");
+  }
 
   // 目标已存在：Overwrite: F → 412。注意这里不再像以前那样先删除目标
   // （H3/M5）：旧目标只有在新内容完整提交之后才会被清理。
@@ -386,6 +388,10 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
     if (!overwrite) return text(412, "目标已存在");
     // N5：目标目录存在但无权写入，也返回 404，不透露目标是否存在。
     if (existing.kind === "dir" && !userCanWrite(user, env, dstPrefix)) return text(404, "Not found");
+    // R3-1：目录源覆盖同名文件时也要查该文件的写权限——上面的 dstOk
+    // 只查了 dstPrefix（to + "/"），漏掉了 to 本身；不查的话该文件
+    // 会在提交后被当成 stale 删掉。
+    if (isDir && existing.kind === "file" && !userCanWrite(user, env, to)) return text(404, "Not found");
   }
   const dstExisted = existing.kind !== "none";
   // 覆盖时需要知道旧目标里有哪些 key：提交完成后删掉不在新内容里的旧文件
@@ -468,8 +474,11 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
         await bucket.delete(stagedKey);
         staged.splice(staged.indexOf(stagedKey), 1);
       }
-      // 全部提交成功后，删掉旧目标里不在新内容里的文件（替换而不是合并）
-      const stale = oldDstKeys.filter((k) => !committed.includes(k));
+      // 全部提交成功后，删掉旧目标里不在新内容里的文件（替换而不是合并）。
+      // R3-1 纵深防御：只删调用者有写权限的 key——正常情况下 oldDstKeys
+      // 都在已查过权限的 dstPrefix 下（或上面已查过的同名文件），这里
+      // 只是兜底，防止将来改动漏查时误删权限外的文件。
+      const stale = oldDstKeys.filter((k) => !committed.includes(k) && userCanWrite(user, env, k));
       if (stale.length > 0) await deleteKeys(bucket, stale);
       committedAll = true;
       // 全部复制成功之后才删除源

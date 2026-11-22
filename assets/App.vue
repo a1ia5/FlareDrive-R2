@@ -1595,7 +1595,12 @@ export default {
             // 删了账户）——不清掉的话每次导航都按失败记一次数，5 次后 IP
             // 被封 30 分钟，连正确密码都登不上。清掉本地凭据；needLogin
             // 本身就会显示登录提示（不用另外弹框）。
-            if (savedCredentials) {
+            // R3-3：needLogin 不只代表凭据错——有合法登录但无权进当前目录
+            // 时也会返回 needLogin。只在服务端确认凭据确实错了
+            // （badCredentials）且本地存的值仍等于发送的值时才清；
+            // 否则一个 ?p=<无权目录> 的链接会把正常用户登出，被封时
+            // 凭据也会被误删；飞行中的旧请求也不会清掉刚换上的新凭据。
+            if (data.badCredentials && savedCredentials && localStorage.getItem('authCredentials') === savedCredentials) {
               localStorage.removeItem('authCredentials');
             }
             this.needLogin = true;
