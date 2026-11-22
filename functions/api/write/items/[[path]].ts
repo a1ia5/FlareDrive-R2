@@ -1,7 +1,7 @@
 import { notFound, parseBucketPath } from "@/utils/bucket";
 import { get_auth_status, checkPathPermission, isInternalPath, isThumbnailKey, isSafeKey } from "@/utils/auth";
 import { deleteUnreferencedThumbnails } from "@/utils/thumbnails";
-import { deleteSharesForKeys } from "@/utils/shares";
+import { deleteSharesForKeys, rebindSharesEtag } from "@/utils/shares";
 import { pickContentType } from "@/utils/response";
 import {isCrossOriginRequest, crossOriginRejectedResponse} from "@/utils/csrf";
 
@@ -131,10 +131,25 @@ export async function onRequestPostFixMetadata(context) {
   // 文件本体完全不经过发起请求的浏览器，不需要客户端重新上传整份文件——
   // 对于修复大视频文件缺失的 content-type / 重新生成缩略图这种场景，
   // 比让前端把整份原始视频再上传一遍要高效得多。
-  const obj = await bucket.put(path, existing.body, {
+  // R3-4：get→put 原来是无条件的——中间若有新上传落盘，会被旧内容覆盖
+  // （lost update），且重写会改 etag、把分享弄断。put 加 onlyIf:
+  // etagMatches，对不上返回 409（前端重试即可）；成功且 etag 变了时，
+  // 把绑定旧 etag 的分享改绑到新 etag。
+  const putOptions: any = {
     customMetadata,
     httpMetadata: contentType ? { contentType } : undefined,
-  });
+  };
+  if (existing.httpEtag) putOptions.onlyIf = { etagMatches: existing.httpEtag };
+  const obj = await bucket.put(path, existing.body, putOptions);
+  if (!obj) {
+    return new Response(JSON.stringify({ error: "文件已被修改，请重试" }), {
+      status: 409,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  if (obj.httpEtag && obj.httpEtag !== existing.httpEtag) {
+    await rebindSharesEtag(bucket, path, existing.httpEtag, obj.httpEtag);
+  }
 
   const { key, size, uploaded } = obj;
   return new Response(JSON.stringify({ key, size, uploaded, customMetadata }), {

@@ -445,6 +445,9 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
       }
       committedAll = true;
       if (move) await bucket.delete(path);
+      // R3-5：MOVE 成功后，源 key 的分享已经死了（旧 key 不存在了），顺带
+      // 清掉，免得管理页留孤儿记录。COPY 不清（源还在，分享仍有效）。
+      if (move) await deleteSharesForKeys(bucket, [path]);
     } else {
       // L11：源目录过大、枚举不完整时直接拒绝，不能只复制其中一部分
       const listed = await listAllKeys(bucket, srcPrefix);
@@ -483,6 +486,10 @@ async function copyOrMove(context, bucket, user: UserInfo, path: string, wantDir
       committedAll = true;
       // 全部复制成功之后才删除源
       if (move) await deleteKeys(bucket, keys);
+      // R3-5：MOVE 成功后源 key 的分享已死，顺带清掉。注意只清源 key 的——
+      // 被覆盖的目标（oldDstKeys）的分享不清：内容相同（etag 不变）时
+      // 目标分享仍有效，清掉会误伤。
+      if (move) await deleteSharesForKeys(bucket, keys);
     }
   } catch (e) {
     console.error("dav copy/move failed:", e);

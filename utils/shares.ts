@@ -23,6 +23,9 @@ const ID_RE = /^[A-Za-z0-9]{10}$/;
 const PASSWORD_ITERATIONS = 10000;
 const PASSWORD_MAX_LENGTH = 128;
 const MAX_DOWNLOADS_LIMIT = 10000;
+// R3-5：每个账户最多创建的分享条数——无上限时任何可写用户都能建出
+// 几千条分享，删文件时的清理（和分享列表）会被拖垮。
+export const MAX_SHARES_PER_USER = 200;
 
 export interface ShareRecord {
   id: string;
@@ -150,6 +153,9 @@ export async function loadShare(bucket: any, id: string): Promise<ShareRecord | 
 export async function saveShare(bucket: any, record: ShareRecord): Promise<void> {
   await bucket.put(SHARE_PREFIX + record.id + ".json", JSON.stringify(record), {
     httpMetadata: { contentType: "application/json" },
+    // R3-5：把目标 key 也写进 customMetadata——删文件清理分享时可以
+    // 只 list（带 customMetadata）就定位到相关记录，不用逐条读记录。
+    customMetadata: { key: record.key },
   });
 }
 
@@ -161,16 +167,49 @@ export async function deleteShare(bucket: any, id: string): Promise<void> {
 // N8：删文件时顺带撤销指向它的分享——否则删完重建同名文件，旧链接
 // 虽然因 etag 比对打不开了，管理页里还挂着一条孤儿记录。尽力而为：
 // 列分享失败不影响删除本身。
+// R3-5：原来是 listShares（逐条读记录），M 个文件 ×（1 次 list + N 次读）。
+// 现在先用一次带 customMetadata 的 list 定位——有 key 元数据的直接删，
+// 不用逐条读；没元数据的老记录（v27 之前创建的）再逐条读确认。
 export async function deleteSharesForKeys(bucket: any, keys: string[]): Promise<void> {
   if (keys.length === 0) return;
   try {
     const wanted = new Set(keys);
-    const all = await listShares(bucket);
-    for (const s of all) {
-      if (wanted.has(s.key)) await deleteShare(bucket, s.id);
+    let cursor: string | undefined = undefined;
+    for (let page = 0; page < 20; page++) {
+      const list = await bucket.list({ prefix: SHARE_PREFIX, include: ["customMetadata"], cursor });
+      for (const o of list.objects || []) {
+        const id = o.key.slice(SHARE_PREFIX.length).replace(/\.json$/, "");
+        const metaKey = o.customMetadata?.key;
+        if (typeof metaKey === "string") {
+          if (wanted.has(metaKey)) await deleteShare(bucket, id);
+        } else {
+          // 老记录没有 key 元数据：读出来再确认（只影响 v27 之前的分享）。
+          const record = await loadShare(bucket, id);
+          if (record && wanted.has(record.key)) await deleteShare(bucket, id);
+        }
+      }
+      if (!list.truncated) break;
+      cursor = list.cursor;
     }
   } catch {
     // 分享清理失败不影响删除本身
+  }
+}
+
+// R3-4：fixMetadata 重写对象后 etag 变了，把绑定旧 etag 的分享改绑到新
+// etag——元数据操作不是替换文件，分享不该断。尽力而为：失败不影响
+// 本次元数据修复。
+export async function rebindSharesEtag(bucket: any, key: string, oldEtag: string, newEtag: string): Promise<void> {
+  if (!oldEtag || oldEtag === newEtag) return;
+  try {
+    const all = await listShares(bucket);
+    for (const s of all) {
+      if (s.key === key && s.etag === oldEtag) {
+        await saveShare(bucket, { ...s, etag: newEtag });
+      }
+    }
+  } catch {
+    // rebind 失败不影响元数据修复本身
   }
 }
 

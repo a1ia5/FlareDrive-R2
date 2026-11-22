@@ -2,7 +2,7 @@
 //
 //   POST   /api/shares        创建分享（登录 + 对文件有读权限；
 //                              访客目录下的文件不建记录、直接返回公开直链）
-//   GET    /api/shares        列出分享（本人创建的；管理员看全部）
+//   GET    /api/shares        列出分享（本人创建的；管理员只看自己能读的）
 //   DELETE /api/shares/{id}   撤销分享（创建者或管理员）
 //
 // 公开下载入口在 functions/share/[[path]].ts（/share/{id}），不在这里。
@@ -22,6 +22,7 @@ import {
   deleteShare,
   listShares,
   shareUrlForId,
+  MAX_SHARES_PER_USER,
 } from "@/utils/shares";
 
 function json(data, status = 200) {
@@ -78,6 +79,20 @@ export async function onRequest(context) {
       return json({ url: `${origin}/raw/${encodeKeyForUrl(key)}`, public: true });
     }
 
+    // R3-5：每账户分享上限——无上限时任何可写用户都能建出几千条分享。
+    // replaceId：分享对话框改选项重新生成时，删掉上一条自己创建的记录，
+    // 避免每次改有效期/密码都在管理页留一条孤儿分享；正在被替换的那条
+    // 不计入上限（净数量不增长）。
+    const replaceId = typeof input?.replaceId === "string" ? input.replaceId : "";
+    try {
+      const mine = (await listShares(bucket)).filter((s) => s.createdBy === user.username);
+      if (mine.length >= MAX_SHARES_PER_USER && !mine.some((s) => s.id === replaceId)) {
+        return json({ error: `每个账户最多创建 ${MAX_SHARES_PER_USER} 个分享链接，请先撤销不用的分享` }, 429);
+      }
+    } catch {
+      // 计数失败时放行（上限是防滥用，不是安全边界；失败不应挡住正常分享）
+    }
+
     const id = createShareId();
     const record = {
       id,
@@ -93,9 +108,6 @@ export async function onRequest(context) {
       etag: obj.httpEtag || null,
     };
     await saveShare(bucket, record);
-    // replaceId：分享对话框改选项重新生成时，删掉上一条自己创建的记录，
-    // 避免每次改有效期/密码都在管理页留一条孤儿分享。
-    const replaceId = typeof input?.replaceId === "string" ? input.replaceId : "";
     if (replaceId && replaceId !== id) {
       const old = await loadShare(bucket, replaceId);
       if (old && (user.isAdmin || old.createdBy === user.username)) {
