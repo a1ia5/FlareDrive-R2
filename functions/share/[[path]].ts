@@ -77,17 +77,11 @@ function passwordForm(id: string, error = ""): Response {
 }
 
 // 流式返回文件字节（复用 /raw/ 的 Range/条件请求处理）
-// R3-8：下载时把分享绑定的 etag 也作为 get 的条件——关掉 checkShareAccess
-// 的 head 验 etag 和这里 get 读文件之间的窗口：中途被替换的文件不会再被
-// 旧链接读出来。etag 为 null 的老分享不传条件，走原来的逻辑。
-async function streamFile(context, key: string, download: boolean, onlyIfEtag: string | null = null) {
+async function streamFile(context, key: string, download: boolean) {
   const request: Request = context.request;
   const bucket = getBucket(context);
-  const object = await bucket.get(key, {
-    range: request.headers,
-    onlyIf: onlyIfEtag ? { etagMatches: onlyIfEtag } : request.headers,
-  });
-  if (!object) return notFoundPage(onlyIfEtag ? "分享的文件已被替换，请重新分享" : "分享的文件已被删除");
+  const object = await bucket.get(key, { range: request.headers, onlyIf: request.headers });
+  if (!object) return notFoundPage("分享的文件已被删除");
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
@@ -132,7 +126,7 @@ export async function onRequestGet(context) {
 
   if (url.searchParams.has("download")) {
     await recordShareDownload(bucket, share);
-    return streamFile(context, share.key, true, share.etag);
+    return streamFile(context, share.key, true);
   }
 
   // v22：分享页不再放原文件预览。?preview=1 已删除（它直接暴露文件字节，

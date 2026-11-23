@@ -1245,7 +1245,7 @@ export default {
       }
     },
 
-    // D1：打开分享管理，列出自己创建的分享（管理员只看自己能读的）
+    // D1：打开分享管理，列出自己创建的分享（管理员看全部）
     async openSharesDialog() {
       if (!this.isLoggedIn) {
         this.showLoginModal();
