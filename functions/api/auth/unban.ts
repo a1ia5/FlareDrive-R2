@@ -1,6 +1,4 @@
 import { authenticateBasic } from "@/utils/auth";
-import { getBucket } from "@/utils/bucket";
-import { clearAuthLimit, clearAllAuthLimitsForUser } from "@/utils/login-limit";
 import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
 
 // 管理员解封用户API
@@ -72,8 +70,7 @@ export async function onRequestPost(context) {
             });
         }
 
-        const bucket = getBucket(context);
-        if (!bucket) {
+        if (!context.env.LOGIN_ATTEMPTS) {
             return new Response(JSON.stringify({
                 success: false,
                 message: "登录限制功能未启用"
@@ -85,8 +82,9 @@ export async function onRequestPost(context) {
 
         // 如果指定了IP，解封特定IP的用户
         if (clientIP) {
-            await clearAuthLimit(bucket, username, clientIP);
-
+            const key = `login_limit:${username}:${clientIP}`;
+            await context.env.LOGIN_ATTEMPTS.delete(key);
+            
             return new Response(JSON.stringify({
                 success: true,
                 message: `已解封用户 ${username} (IP: ${clientIP})`
@@ -95,16 +93,14 @@ export async function onRequestPost(context) {
                 headers: { "Content-Type": "application/json" }
             });
         } else {
-            // 不指定 IP 时解封该用户在所有 IP 上的限制（R2 可以按前缀
-            // list，KV 做不到；v28 起支持）。
-            const count = await clearAllAuthLimitsForUser(bucket, username);
+            // 解封该用户的所有IP限制
+            // 注意：KV不支持前缀删除，这里只能提供单个IP解封
+            // 如果需要批量解封，需要前端传入具体的IP列表
             return new Response(JSON.stringify({
-                success: true,
-                message: count > 0
-                    ? `已解封用户 ${username} 在 ${count} 个 IP 上的登录限制`
-                    : `用户 ${username} 无登录限制记录`
+                success: false,
+                message: "请指定要解封的客户端IP地址"
             }), {
-                status: 200,
+                status: 400,
                 headers: { "Content-Type": "application/json" }
             });
         }

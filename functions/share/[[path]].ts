@@ -15,7 +15,7 @@
 
 import { getBucket } from "@/utils/bucket";
 import { applyObjectSecurityHeaders } from "@/utils/response";
-import { getClientIP, claimSharePasswordAttempt, clearSharePasswordLimit } from "@/utils/login-limit";
+import { getClientIP, checkSharePasswordLimit, recordSharePasswordFailure } from "@/utils/login-limit";
 import {
   shareKeyForId,
   checkShareAccess,
@@ -187,23 +187,22 @@ export async function onRequestPost(context) {
   } catch {
     return passwordForm(id, "提交失败，请重试");
   }
-  // F6：分享密码也限流（与登录限流同一套 R2 存储和阈值，键 share_limit:<id>:<IP>）。
+  // F6：分享密码也限流（与登录限流同一套 KV 和阈值，键 share_limit:<id>:<IP>）。
   // 拿到链接的人不能无限试密码；被封禁时不再校验密码（也不透露密码是否正确）。
-  // v28（R3-2）：先原子认领一次尝试，失败不用再另记（已记过）；通过后要清零。
   const clientIP = getClientIP(context.request);
-  const limit = await claimSharePasswordAttempt(bucket, id, clientIP);
+  const limit = await checkSharePasswordLimit(context.env, id, clientIP);
   if (!limit.allowed) {
     return passwordForm(id, `密码尝试次数过多，请在 ${Math.ceil((limit.remainingBanTime || 0) / 60)} 分钟后重试`);
   }
   if (!(await verifySharePassword(share, password))) {
-    // remainingAttempts === 0 说明这次就是第 5 次，封禁已生效。
-    if (limit.remainingAttempts === 0) {
-      return passwordForm(id, `密码尝试次数过多，请在 ${Math.ceil((limit.remainingBanTime || 0) / 60)} 分钟后重试`);
+    await recordSharePasswordFailure(context.env, id, clientIP);
+    const updated = await checkSharePasswordLimit(context.env, id, clientIP);
+    if (!updated.allowed) {
+      return passwordForm(id, `密码尝试次数过多，请在 ${Math.ceil((updated.remainingBanTime || 0) / 60)} 分钟后重试`);
     }
     return passwordForm(id, "密码错误");
   }
 
-  await clearSharePasswordLimit(bucket, id, clientIP);
   const token = await issueSharePasswordToken(context.env, bucket, id);
   const secure = new URL(context.request.url).protocol === "https:";
   const cookie =

@@ -1,6 +1,4 @@
 import { authenticateBasic } from "@/utils/auth";
-import { getBucket } from "@/utils/bucket";
-import { getLimitState } from "@/utils/login-limit";
 
 // 查询用户封禁状态API
 function getClientIP(request) {
@@ -77,8 +75,7 @@ export async function onRequestPost(context) {
             });
         }
 
-        const bucket = getBucket(context);
-        if (!bucket) {
+        if (!context.env.LOGIN_ATTEMPTS) {
             return new Response(JSON.stringify({
                 success: true,
                 message: "登录限制功能未启用",
@@ -90,9 +87,10 @@ export async function onRequestPost(context) {
         }
 
         const targetIP = checkIP || clientIP;
-        const data = await getLimitState(bucket, username, targetIP);
-
-        if (!data) {
+        const key = `login_limit:${username}:${targetIP}`;
+        const limitData = await context.env.LOGIN_ATTEMPTS.get(key);
+        
+        if (!limitData) {
             return new Response(JSON.stringify({
                 success: true,
                 status: "clean",
@@ -105,6 +103,7 @@ export async function onRequestPost(context) {
             });
         }
 
+        const data = JSON.parse(limitData);
         const now = Math.floor(Date.now() / 1000);
 
         let status = "limited";
