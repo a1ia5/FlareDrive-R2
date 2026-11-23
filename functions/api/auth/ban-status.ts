@@ -1,4 +1,5 @@
 import { authenticateBasic } from "@/utils/auth";
+import { limiterEnabled, limiterBackend, loginLimitKey, readLimitRecord } from "@/utils/login-limit";
 
 // 查询用户封禁状态API
 function getClientIP(request) {
@@ -75,7 +76,7 @@ export async function onRequestPost(context) {
             });
         }
 
-        if (!context.env.LOGIN_ATTEMPTS) {
+        if (!limiterEnabled(context.env)) {
             return new Response(JSON.stringify({
                 success: true,
                 message: "登录限制功能未启用",
@@ -87,23 +88,25 @@ export async function onRequestPost(context) {
         }
 
         const targetIP = checkIP || clientIP;
-        const key = `login_limit:${username}:${targetIP}`;
-        const limitData = await context.env.LOGIN_ATTEMPTS.get(key);
-        
-        if (!limitData) {
+        const data = await readLimitRecord(context.env, loginLimitKey(username, targetIP));
+        // limiterBackend：当前生效的限流后端（d1 = 原子计数；kv = 退路，有并发窗口；
+        // 方便管理员确认限流真的在工作，而不是静默失效）。
+        const backend = limiterBackend(context.env);
+
+        if (!data) {
             return new Response(JSON.stringify({
                 success: true,
                 status: "clean",
                 message: `用户 ${username} (IP: ${targetIP}) 无登录限制记录`,
                 username,
-                clientIP: targetIP
+                clientIP: targetIP,
+                limiterBackend: backend
             }), {
                 status: 200,
                 headers: { "Content-Type": "application/json" }
             });
         }
 
-        const data = JSON.parse(limitData);
         const now = Math.floor(Date.now() / 1000);
 
         let status = "limited";
@@ -125,7 +128,8 @@ export async function onRequestPost(context) {
             firstAttempt: data.firstAttempt,
             lastAttempt: data.lastAttempt,
             bannedUntil: data.bannedUntil,
-            remainingBanTime: data.bannedUntil && now < data.bannedUntil ? data.bannedUntil - now : 0
+            remainingBanTime: data.bannedUntil && now < data.bannedUntil ? data.bannedUntil - now : 0,
+            limiterBackend: backend
         }), {
             status: 200,
             headers: { "Content-Type": "application/json" }

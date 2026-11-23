@@ -21,8 +21,11 @@ import {
   loadShare,
   deleteShare,
   listShares,
+  scanShares,
   shareUrlForId,
+  MAX_SHARES_PER_USER,
 } from "@/utils/shares";
+import { rawEtagOf } from "@/utils/etag";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -78,6 +81,17 @@ export async function onRequest(context) {
       return json({ url: `${origin}/raw/${encodeKeyForUrl(key)}`, public: true });
     }
 
+    // R3-5：每个用户的分享数上限。数的是"创建者是这个用户的记录"（不是前缀下
+    // 全部记录）；用 customMetadata 一次列表拿到，不逐条读。改选项重新生成
+    // （replaceId 指向自己的记录）会先建新的再删旧的，这一条不算占用名额。
+    const replaceId = typeof input?.replaceId === "string" ? input.replaceId : "";
+    const { entries } = await scanShares(bucket);
+    const own = entries.filter((e) => e.createdBy === user.username);
+    const replacing = replaceId !== "" && own.some((e) => e.id === replaceId);
+    if (own.length - (replacing ? 1 : 0) >= MAX_SHARES_PER_USER) {
+      return json({ error: `分享数量已达上限（${MAX_SHARES_PER_USER} 条），请先在“管理分享链接”里撤销不用的分享` }, 429);
+    }
+
     const id = createShareId();
     const record = {
       id,
@@ -89,13 +103,14 @@ export async function onRequest(context) {
       maxDownloads,
       downloads: 0,
       createdBy: user.username,
-      // N8：绑定创建时这个文件（httpEtag）；文件被替换后旧链接失效。
-      etag: obj.httpEtag || null,
+      // N8：绑定创建时这个文件；文件被替换后旧链接失效。存**原始** etag
+      // （obj.etag，不带引号）：它既要拿来比较，也要原样传给 R2 的 onlyIf，
+      // 而 R2 条件参数不认 httpEtag 的引号写法（见 utils/etag.ts）。
+      etag: rawEtagOf(obj) || null,
     };
     await saveShare(bucket, record);
     // replaceId：分享对话框改选项重新生成时，删掉上一条自己创建的记录，
     // 避免每次改有效期/密码都在管理页留一条孤儿分享。
-    const replaceId = typeof input?.replaceId === "string" ? input.replaceId : "";
     if (replaceId && replaceId !== id) {
       const old = await loadShare(bucket, replaceId);
       if (old && (user.isAdmin || old.createdBy === user.username)) {

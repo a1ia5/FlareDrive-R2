@@ -6,9 +6,19 @@
 //   - utils/auth.ts 的 getRequestUser()：所有走 Basic 认证的接口都经过它，
 //     在校验前先查是否被封禁（被封禁直接返回 null，不做 PBKDF2），
 //     校验失败时记一次数。
-// KV 键格式与原来一致（login_limit:<用户名>:<IP>），ban-status / unban
-// 接口直接读同一个键，不用改。LOGIN_ATTEMPTS 未绑定时限流静默关闭
-// （只在日志里报一次），不阻塞登录——与原来行为一致。
+// R3-2：计数改为 D1 里的原子"先占名额、再校验"（reserve-before-verify）。
+// 原来的 KV 读-改-写既不是原子的（并行请求都先读到旧计数，同时开始校验），
+// KV 在边缘节点之间还是最终一致的——"每 账号/IP 每小时 5 次"只对串行猜测有效。
+// 现在：校验密码之前先对 login_attempts 表做一条
+//   INSERT … ON CONFLICT DO UPDATE … RETURNING
+// 单语句占一个名额；D1 同一时刻只有一个主库在写，该语句是原子的，也不受边缘
+// 节点影响。占到 1–5 号名额的请求才去校验密码，第 6 个起直接拒绝（不做
+// PBKDF2）——并行发 30 个不同的猜测，只有 5 个会被校验。校验成功清零、失败
+// 保留名额，第 5 次失败写入 30 分钟封禁。
+// 没有绑定 D1（DB）时退回原来的 KV 实现（LOGIN_ATTEMPTS，非原子，有并发窗口）；
+// D1 出错时也退回 KV，再不行才 fail-open（日志里大声报，不静默）。
+// 表 login_attempts 会在首次使用时自动创建（migrations/0002_login_attempts.sql
+// 是同一份 DDL，可选手动执行）。
 
 export const LOGIN_LIMIT_CONFIG = {
   MAX_ATTEMPTS: 5, // 最大尝试次数
@@ -33,7 +43,7 @@ function warnLoginLimitDisabled() {
   if (warnedNoLoginAttemptsKv) return;
   warnedNoLoginAttemptsKv = true;
   console.error(
-    "[SECURITY] LOGIN_ATTEMPTS KV 未绑定，登录限流已关闭：同一账号/IP 可无限尝试密码。请在 Cloudflare Pages 设置里绑定 LOGIN_ATTEMPTS KV 命名空间。"
+    "[SECURITY] 登录限流已关闭（fail-open）：DB（D1）和 LOGIN_ATTEMPTS（KV）都没有绑定或都不可用，同一账号/IP 可无限尝试密码。请在 Cloudflare Pages 设置里绑定 D1 数据库 DB（推荐，原子限流）和/或 LOGIN_ATTEMPTS KV 命名空间。"
   );
 }
 
@@ -46,11 +56,11 @@ function warnKvError(error) {
   console.error("[SECURITY] LOGIN_ATTEMPTS KV 出错，登录限流已临时关闭（fail-open）：", error);
 }
 
-// 检查用户是否被封禁（KV 键由调用方给：登录用 login_limit:<用户名>:<IP>，
-// 分享密码用 share_limit:<分享ID>:<IP>，见 F6）。
-export async function checkAuthLimit(env, username, clientIP) {
-  return checkLimitByKey(env, `login_limit:${username}:${clientIP}`);
-}
+// ---------------------------------------------------------------------------
+// KV 实现（没有 D1 或 D1 出错时的退路；非原子）
+// 键由调用方给：登录用 login_limit:<用户名>:<IP>，分享密码用
+// share_limit:<分享ID>:<IP>，见 F6。
+// ---------------------------------------------------------------------------
 
 async function checkLimitByKey(env, key) {
   if (!env.LOGIN_ATTEMPTS) {
@@ -129,11 +139,6 @@ async function checkLimitByKey(env, key) {
   };
 }
 
-// 记录一次认证失败
-export async function recordAuthFailure(env, username, clientIP) {
-  return recordFailureByKey(env, `login_limit:${username}:${clientIP}`);
-}
-
 async function recordFailureByKey(env, key) {
   if (!env.LOGIN_ATTEMPTS) {
     return;
@@ -173,33 +178,246 @@ async function recordFailureByKey(env, key) {
   }
 }
 
-// 清除登录限制记录（登录成功时调用）
-export async function clearAuthLimit(env, username, clientIP) {
-  if (!env.LOGIN_ATTEMPTS) {
-    return;
+// ---------------------------------------------------------------------------
+// D1 实现（主路径，原子）
+// ---------------------------------------------------------------------------
+
+let warnedD1Error = false;
+function warnD1Error(error) {
+  if (warnedD1Error) return;
+  warnedD1Error = true;
+  console.error("[SECURITY] 登录限流的 D1 表出错，退回 KV 限流（非原子）：", error);
+}
+
+let tableReady: Promise<void> | null = null;
+function ensureTable(db): Promise<void> {
+  if (!tableReady) {
+    tableReady = db
+      .prepare(
+        "CREATE TABLE IF NOT EXISTS login_attempts (" +
+          "k TEXT PRIMARY KEY, attempts INTEGER NOT NULL, window_start INTEGER NOT NULL, " +
+          "last_attempt INTEGER NOT NULL, banned_until INTEGER NOT NULL DEFAULT 0)"
+      )
+      .run()
+      .then(() => undefined, (e) => {
+        tableReady = null; // 下次再试
+        throw e;
+      });
+  }
+  return tableReady;
+}
+
+// 键（login_limit:<用户名>:<IP> / share_limit:<ID>:<IP>）取 SHA-256 作为 D1 主键：
+// 定长、不含用户输入的原文（用户名可以任意长）。
+async function hashKey(key: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export interface AttemptReservation {
+  allowed: boolean;
+  banned?: boolean;
+  remainingBanTime?: number;
+  message?: string;
+  attempts?: number; // 占到的名额序号（1 起）
+  backend: "d1" | "kv" | "none";
+  key: string;
+}
+
+const lockedMessage = (seconds: number) => `账户已被临时锁定，请在 ${Math.ceil(seconds / 60)} 分钟后重试`;
+
+// 原子占一个名额。单条语句同时完成"窗口/封禁到期重置""计数加一""读回结果"；
+// SQLite 的 SET 表达式都按旧行取值，所以各列的 CASE 里反复用旧的 banned_until /
+// window_start 是对的。封禁期内不加计数、不延长封禁。
+async function d1Reserve(env, key: string): Promise<AttemptReservation> {
+  await ensureTable(env.DB);
+  const now = Math.floor(Date.now() / 1000);
+  const W = LOGIN_LIMIT_CONFIG.ATTEMPT_WINDOW;
+  const row: any = await env.DB.prepare(
+    `INSERT INTO login_attempts (k, attempts, window_start, last_attempt, banned_until)
+     VALUES (?1, 1, ?2, ?2, 0)
+     ON CONFLICT(k) DO UPDATE SET
+       attempts = CASE
+         WHEN banned_until > ?2 THEN attempts
+         WHEN banned_until > 0 OR ?2 - window_start > ?3 THEN 1
+         ELSE attempts + 1 END,
+       window_start = CASE
+         WHEN banned_until <= ?2 AND (banned_until > 0 OR ?2 - window_start > ?3) THEN ?2
+         ELSE window_start END,
+       last_attempt = ?2,
+       banned_until = CASE WHEN banned_until > 0 AND banned_until <= ?2 THEN 0 ELSE banned_until END
+     RETURNING attempts, banned_until`
+  )
+    .bind(await hashKey(key), now, W)
+    .first();
+  if (!row) throw new Error("login_attempts upsert returned no row");
+
+  // 顺手清理过期记录（约 2% 的请求），表不会被乱填的用户名撑大。
+  if (Math.random() < 0.02) {
+    try {
+      await env.DB.prepare("DELETE FROM login_attempts WHERE banned_until <= ?1 AND window_start < ?1 - ?2").bind(now, W).run();
+    } catch {
+      // 清理失败不影响限流
+    }
   }
 
-  const key = `login_limit:${username}:${clientIP}`;
+  if (row.banned_until > now) {
+    const remaining = row.banned_until - now;
+    return { allowed: false, banned: true, remainingBanTime: remaining, message: lockedMessage(remaining), attempts: row.attempts, backend: "d1", key };
+  }
+  if (row.attempts > LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS) {
+    // 名额已被前 5 个请求占满、封禁还没写下来（它在第 5 次失败时写）：同样拒绝。
+    return {
+      allowed: false,
+      banned: true,
+      remainingBanTime: LOGIN_LIMIT_CONFIG.BAN_DURATION,
+      message: `登录尝试次数过多，账户已被锁定 ${LOGIN_LIMIT_CONFIG.BAN_DURATION / 60} 分钟`,
+      attempts: row.attempts,
+      backend: "d1",
+      key,
+    };
+  }
+  return { allowed: true, attempts: row.attempts, backend: "d1", key };
+}
+
+async function reserveByKey(env, key: string): Promise<AttemptReservation> {
+  if (env.DB) {
+    try {
+      return await d1Reserve(env, key);
+    } catch (error) {
+      warnD1Error(error);
+    }
+  }
+  if (env.LOGIN_ATTEMPTS) {
+    const r: any = await checkLimitByKey(env, key);
+    return { ...r, backend: "kv", key };
+  }
+  warnLoginLimitDisabled();
+  return { allowed: true, backend: "none", key };
+}
+
+// 校验失败后调用：名额不退。占到最后一个名额的那次失败写入封禁。
+async function failureByKey(env, key: string, reservation?: AttemptReservation) {
+  if (reservation?.backend === "d1") {
+    try {
+      await ensureTable(env.DB);
+      const now = Math.floor(Date.now() / 1000);
+      const last = (reservation?.attempts ?? 0) >= LOGIN_LIMIT_CONFIG.MAX_ATTEMPTS;
+      if (last) {
+        await env.DB.prepare("UPDATE login_attempts SET banned_until = ?2 + ?3 WHERE k = ?1 AND banned_until <= ?2")
+          .bind(await hashKey(key), now, LOGIN_LIMIT_CONFIG.BAN_DURATION)
+          .run();
+        return {
+          banned: true,
+          remainingBanTime: LOGIN_LIMIT_CONFIG.BAN_DURATION,
+          message: `登录尝试次数过多，账户已被锁定 ${LOGIN_LIMIT_CONFIG.BAN_DURATION / 60} 分钟`,
+        };
+      }
+      return { banned: false };
+    } catch (error) {
+      warnD1Error(error);
+      return { banned: false };
+    }
+  }
+  if (reservation?.backend === "kv") {
+    await recordFailureByKey(env, key);
+    const after: any = await checkLimitByKey(env, key);
+    return after.allowed ? { banned: false } : { banned: true, remainingBanTime: after.remainingBanTime, message: after.message };
+  }
+  return { banned: false };
+}
+
+// 校验成功 / 其它情况需要清零：D1 行和 KV 键都删（任一出错只告警）。
+async function clearByKey(env, key: string) {
+  if (env.DB) {
+    try {
+      await ensureTable(env.DB);
+      await env.DB.prepare("DELETE FROM login_attempts WHERE k = ?1").bind(await hashKey(key)).run();
+    } catch (error) {
+      warnD1Error(error);
+    }
+  }
+  if (env.LOGIN_ATTEMPTS) {
+    try {
+      await env.LOGIN_ATTEMPTS.delete(key);
+    } catch (error) {
+      // N10：删失败不影响登录成功本身，记录靠 TTL 自然过期。
+      warnKvError(error);
+    }
+  }
+}
+
+// 校验过程中出了基础设施错误（不是密码错）：把占的名额还回去，
+// 否则 D1/依赖故障期间合法用户会被自己的重试锁住。
+async function releaseByKey(env, reservation?: AttemptReservation) {
+  if (reservation?.backend !== "d1") return;
   try {
-    await env.LOGIN_ATTEMPTS.delete(key);
+    await env.DB.prepare("UPDATE login_attempts SET attempts = MAX(attempts - 1, 0) WHERE k = ?1")
+      .bind(await hashKey(reservation.key))
+      .run();
   } catch (error) {
-    // N10：删失败不影响登录成功本身，记录靠 TTL 自然过期。
-    warnKvError(error);
+    warnD1Error(error);
   }
 }
 
-// ---------------------------------------------------------------------------
-// F6：分享访问密码的试错限流（与登录限流共用同一套 KV 和阈值，键不同）。
-// 分享 ID 是 10 位随机字符，猜不到；但拿到链接的人可以无限试密码。
-// 键：share_limit:<分享ID>:<IP>。LOGIN_ATTEMPTS 未绑定时不限流（fail-open）。
-// ---------------------------------------------------------------------------
+export const loginLimitKey = (username: string, clientIP: string) => `login_limit:${username}:${clientIP}`;
+export const shareLimitKey = (shareId: string, clientIP: string) => `share_limit:${shareId}:${clientIP}`;
 
-// 检查该分享的密码是否已被封禁
-export async function checkSharePasswordLimit(env, shareId, clientIP) {
-  return checkLimitByKey(env, `share_limit:${shareId}:${clientIP}`);
+// ---- 登录 / Basic 认证 ----
+export const reserveAuthAttempt = (env, username: string, clientIP: string) => reserveByKey(env, loginLimitKey(username, clientIP));
+export const recordAuthFailure = (env, username: string, clientIP: string, reservation?: AttemptReservation) =>
+  failureByKey(env, loginLimitKey(username, clientIP), reservation);
+export const clearAuthLimit = (env, username: string, clientIP: string) => clearByKey(env, loginLimitKey(username, clientIP));
+export const releaseAuthAttempt = (env, reservation?: AttemptReservation) => releaseByKey(env, reservation);
+
+// ---------------------------------------------------------------------------
+// F6：分享访问密码的试错限流（与登录限流共用同一套机制和阈值，键不同）。
+// 分享 ID 是 10 位随机字符，猜不到；但拿到链接的人可以无限试密码。
+// 键：share_limit:<分享ID>:<IP>。两个后端都没有时不限流（fail-open）。
+// ---------------------------------------------------------------------------
+export const reserveSharePasswordAttempt = (env, shareId: string, clientIP: string) => reserveByKey(env, shareLimitKey(shareId, clientIP));
+export const recordSharePasswordFailure = (env, shareId: string, clientIP: string, reservation?: AttemptReservation) =>
+  failureByKey(env, shareLimitKey(shareId, clientIP), reservation);
+export const clearSharePasswordLimit = (env, shareId: string, clientIP: string) => clearByKey(env, shareLimitKey(shareId, clientIP));
+
+// ---------------------------------------------------------------------------
+// 管理接口用：读 / 删某个键的限流记录（ban-status / unban）。
+// ---------------------------------------------------------------------------
+export interface LimitRecord {
+  attempts: number;
+  firstAttempt: number;
+  lastAttempt: number;
+  bannedUntil: number;
+  backend: "d1" | "kv";
 }
 
-// 记录一次分享密码错误
-export async function recordSharePasswordFailure(env, shareId, clientIP) {
-  return recordFailureByKey(env, `share_limit:${shareId}:${clientIP}`);
+export async function readLimitRecord(env, key: string): Promise<LimitRecord | null> {
+  if (env.DB) {
+    try {
+      await ensureTable(env.DB);
+      const row: any = await env.DB.prepare("SELECT attempts, window_start, last_attempt, banned_until FROM login_attempts WHERE k = ?1")
+        .bind(await hashKey(key))
+        .first();
+      if (row) {
+        return { attempts: row.attempts, firstAttempt: row.window_start, lastAttempt: row.last_attempt, bannedUntil: row.banned_until, backend: "d1" };
+      }
+    } catch (error) {
+      warnD1Error(error);
+    }
+  }
+  if (env.LOGIN_ATTEMPTS) {
+    const raw = await env.LOGIN_ATTEMPTS.get(key);
+    if (raw) {
+      const d = JSON.parse(raw);
+      return { attempts: d.attempts, firstAttempt: d.firstAttempt, lastAttempt: d.lastAttempt, bannedUntil: d.bannedUntil || 0, backend: "kv" };
+    }
+  }
+  return null;
+}
+
+export const limiterEnabled = (env) => !!(env.DB || env.LOGIN_ATTEMPTS);
+export const limiterBackend = (env): "d1" | "kv" | "none" => (env.DB ? "d1" : env.LOGIN_ATTEMPTS ? "kv" : "none");
+
+export async function deleteLimitRecord(env, key: string): Promise<void> {
+  await clearByKey(env, key);
 }

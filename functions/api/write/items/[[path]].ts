@@ -1,7 +1,8 @@
 import { notFound, parseBucketPath } from "@/utils/bucket";
 import { get_auth_status, checkPathPermission, isInternalPath, isThumbnailKey, isSafeKey } from "@/utils/auth";
 import { deleteUnreferencedThumbnails } from "@/utils/thumbnails";
-import { deleteSharesForKeys } from "@/utils/shares";
+import { deleteSharesForKeys, rebindSharesEtag } from "@/utils/shares";
+import { rawEtagOf } from "@/utils/etag";
 import { pickContentType } from "@/utils/response";
 import {isCrossOriginRequest, crossOriginRejectedResponse} from "@/utils/csrf";
 
@@ -131,13 +132,42 @@ export async function onRequestPostFixMetadata(context) {
   // 文件本体完全不经过发起请求的浏览器，不需要客户端重新上传整份文件——
   // 对于修复大视频文件缺失的 content-type / 重新生成缩略图这种场景，
   // 比让前端把整份原始视频再上传一遍要高效得多。
+  //
+  // R3-4：put 带条件 onlyIf: { etagMatches: <get 到的原始 etag> }——get 与 put
+  // 之间文件被别人重新上传时 put 返回 null、不写入，不会拿旧内容覆盖新上传
+  // （丢失更新）。这里必须用 existing.etag（原始值），不是 httpEtag：R2 条件
+  // 参数不认带引号的写法，会直接抛异常（见 utils/etag.ts）。
+  const oldEtag = rawEtagOf(existing);
   const obj = await bucket.put(path, existing.body, {
     customMetadata,
     httpMetadata: contentType ? { contentType } : undefined,
+    onlyIf: { etagMatches: oldEtag },
   });
+  if (!obj) {
+    return new Response(JSON.stringify({ error: "文件在处理期间被修改，请重试" }), {
+      status: 412,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // 重写后 etag 可能换了格式（分片上传的 >100 MB 文件是 <md5>-<N>，单 PUT 重写后
+  // 是 <md5>），而分享绑定的是 etag——不改绑的话，这个文件上所有分享都会变成
+  // "分享的文件已被替换"。内容没变（条件写入已保证写的就是刚读到的那份），
+  // 把绑定旧 etag 的分享改绑到新 etag。改绑失败不影响本次请求（文件已写好），
+  // 但会在返回里标出来。
+  let sharesRebound = 0;
+  let sharesRebindFailed = 0;
+  try {
+    const r = await rebindSharesEtag(bucket, path, oldEtag, rawEtagOf(obj));
+    sharesRebound = r.rebound;
+    sharesRebindFailed = r.failed;
+  } catch (error) {
+    sharesRebindFailed = 1;
+    console.error("[shares] 改绑分享 etag 失败：", error);
+  }
 
   const { key, size, uploaded } = obj;
-  return new Response(JSON.stringify({ key, size, uploaded, customMetadata }), {
+  return new Response(JSON.stringify({ key, size, uploaded, customMetadata, sharesRebound, sharesRebindFailed }), {
     headers: { "Content-Type": "application/json" },
   });
 }

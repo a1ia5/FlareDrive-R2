@@ -1,5 +1,6 @@
 import { authenticateBasic } from "@/utils/auth";
 import { isCrossOriginRequest, crossOriginRejectedResponse } from "@/utils/csrf";
+import { limiterEnabled, loginLimitKey, deleteLimitRecord } from "@/utils/login-limit";
 
 // 管理员解封用户API
 export async function onRequestPost(context) {
@@ -70,7 +71,7 @@ export async function onRequestPost(context) {
             });
         }
 
-        if (!context.env.LOGIN_ATTEMPTS) {
+        if (!limiterEnabled(context.env)) {
             return new Response(JSON.stringify({
                 success: false,
                 message: "登录限制功能未启用"
@@ -82,8 +83,8 @@ export async function onRequestPost(context) {
 
         // 如果指定了IP，解封特定IP的用户
         if (clientIP) {
-            const key = `login_limit:${username}:${clientIP}`;
-            await context.env.LOGIN_ATTEMPTS.delete(key);
+            // R3-2：计数在 D1（没有 D1 时在 KV），两处都删。
+            await deleteLimitRecord(context.env, loginLimitKey(username, clientIP));
             
             return new Response(JSON.stringify({
                 success: true,

@@ -2,7 +2,7 @@
 //
 //   GET  /share/{id}             分享页（文件名、大小、有效期、缩略图、下载按钮）
 //   GET  /share/{id}?thumb=1    缩略图 PNG（有缩略图的文件才有；不计下载次数）
-//   GET  /share/{id}?download=1 下载（计一次下载次数，Content-Disposition: attachment）
+//   GET  /share/{id}?download=1 下载（成功返回文件才计一次下载次数，Content-Disposition: attachment）
 //   POST /share/{id}             提交访问密码（表单 POST，密码不进 URL）
 //
 // v22：分享页不再放原文件预览，?preview=1 已删除——它直接暴露文件字节，
@@ -15,7 +15,7 @@
 
 import { getBucket } from "@/utils/bucket";
 import { applyObjectSecurityHeaders } from "@/utils/response";
-import { getClientIP, checkSharePasswordLimit, recordSharePasswordFailure } from "@/utils/login-limit";
+import { getClientIP, reserveSharePasswordAttempt, recordSharePasswordFailure, clearSharePasswordLimit, releaseAuthAttempt } from "@/utils/login-limit";
 import {
   shareKeyForId,
   checkShareAccess,
@@ -26,6 +26,7 @@ import {
   recordShareDownload,
 } from "@/utils/shares";
 import { thumbnailKeyForDigest } from "@/utils/thumbnails";
+import { normalizeEtag } from "@/utils/etag";
 
 function htmlEscape(s: string): string {
   return String(s ?? "")
@@ -76,12 +77,25 @@ function passwordForm(id: string, error = ""): Response {
   );
 }
 
-// 流式返回文件字节（复用 /raw/ 的 Range/条件请求处理）
-async function streamFile(context, key: string, download: boolean) {
+// 流式返回文件字节（复用 /raw/ 的 Range/条件请求处理）。
+// boundEtag：分享绑定的 etag（R3-8）。传了就把它作为读取条件
+// onlyIf: { etagMatches: <原始 etag> }——检查和读取在 R2 里是同一次原子操作，
+// 文件在 head 检查与读取之间被替换时读不到新文件的字节（没有 body → 404），
+// 关掉 head-then-get 的窗口。注意 R2 条件参数只认**原始** etag（不带引号），
+// 记录里 v25–v28 存的带引号值要先 normalizeEtag；此时不再使用客户端的
+// If-None-Match 等条件头（下载永远返回 200/206，不会是 304）。
+async function streamFile(context, key: string, download: boolean, boundEtag: string | null = null) {
   const request: Request = context.request;
   const bucket = getBucket(context);
-  const object = await bucket.get(key, { range: request.headers, onlyIf: request.headers });
+  const bound = normalizeEtag(boundEtag);
+  const object = await bucket.get(key, {
+    range: request.headers,
+    onlyIf: bound ? { etagMatches: bound } : request.headers,
+  });
   if (!object) return notFoundPage("分享的文件已被删除");
+  if (bound && !("body" in object && object.body)) {
+    return notFoundPage("分享的文件已被替换，请重新分享");
+  }
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
@@ -125,8 +139,10 @@ export async function onRequestGet(context) {
   const url = new URL(context.request.url);
 
   if (url.searchParams.has("download")) {
-    await recordShareDownload(bucket, share);
-    return streamFile(context, share.key, true);
+    const response = await streamFile(context, share.key, true, share.etag);
+    // 只有文件真正返回（200/206）才计一次下载；404/304/500 不占 maxDownloads。
+    if (response.status === 200 || response.status === 206) await recordShareDownload(bucket, share);
+    return response;
   }
 
   // v22：分享页不再放原文件预览。?preview=1 已删除（它直接暴露文件字节，
@@ -187,21 +203,30 @@ export async function onRequestPost(context) {
   } catch {
     return passwordForm(id, "提交失败，请重试");
   }
-  // F6：分享密码也限流（与登录限流同一套 KV 和阈值，键 share_limit:<id>:<IP>）。
-  // 拿到链接的人不能无限试密码；被封禁时不再校验密码（也不透露密码是否正确）。
+  // F6：分享密码也限流（键 share_limit:<id>:<IP>）。拿到链接的人不能无限试密码；
+  // 被封禁时不再校验密码（也不透露密码是否正确）。
+  // R3-2：与登录同一套——先原子占名额再校验（D1），并行猜测只有前 5 个会被校验；
+  // 校验成功清零，失败保留名额，第 5 次失败写封禁。
   const clientIP = getClientIP(context.request);
-  const limit = await checkSharePasswordLimit(context.env, id, clientIP);
+  const limit = await reserveSharePasswordAttempt(context.env, id, clientIP);
   if (!limit.allowed) {
     return passwordForm(id, `密码尝试次数过多，请在 ${Math.ceil((limit.remainingBanTime || 0) / 60)} 分钟后重试`);
   }
-  if (!(await verifySharePassword(share, password))) {
-    await recordSharePasswordFailure(context.env, id, clientIP);
-    const updated = await checkSharePasswordLimit(context.env, id, clientIP);
-    if (!updated.allowed) {
-      return passwordForm(id, `密码尝试次数过多，请在 ${Math.ceil((updated.remainingBanTime || 0) / 60)} 分钟后重试`);
+  let passwordOk: boolean;
+  try {
+    passwordOk = await verifySharePassword(share, password);
+  } catch (error) {
+    await releaseAuthAttempt(context.env, limit);
+    throw error;
+  }
+  if (!passwordOk) {
+    const failure = await recordSharePasswordFailure(context.env, id, clientIP, limit);
+    if (failure.banned) {
+      return passwordForm(id, `密码尝试次数过多，请在 ${Math.ceil((failure.remainingBanTime || 0) / 60)} 分钟后重试`);
     }
     return passwordForm(id, "密码错误");
   }
+  await clearSharePasswordLimit(context.env, id, clientIP);
 
   const token = await issueSharePasswordToken(context.env, bucket, id);
   const secure = new URL(context.request.url).protocol === "https:";

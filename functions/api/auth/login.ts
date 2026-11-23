@@ -1,6 +1,6 @@
 import { resolveAccount } from "@/utils/auth";
 // 限流计数已抽到 utils/login-limit.ts（与 getRequestUser 共用，见 F2）。
-import { getClientIP, checkAuthLimit, recordAuthFailure, clearAuthLimit } from "@/utils/login-limit";
+import { getClientIP, reserveAuthAttempt, recordAuthFailure, clearAuthLimit, releaseAuthAttempt } from "@/utils/login-limit";
 
 export async function onRequestPost(context) {
     try {
@@ -46,8 +46,9 @@ export async function onRequestPost(context) {
         // 提取用户名用于限制检查
         let username = account.split(':')[0];
 
-        // 检查登录限制
-        const limitCheck = await checkAuthLimit(context.env, username, clientIP);
+        // R3-2：先原子占名额、再校验（见 utils/login-limit.ts）。占不到
+        // （已封禁 / 名额被并行请求占满）直接 429，不做密码校验。
+        const limitCheck = await reserveAuthAttempt(context.env, username, clientIP);
         if (!limitCheck.allowed) {
             return new Response(JSON.stringify({
                 success: false,
@@ -61,29 +62,33 @@ export async function onRequestPost(context) {
         }
 
         // 校验账户：优先查询 D1 数据库中的账户，找不到则回退到旧版环境变量账户
-        const userInfo = await resolveAccount(account, context);
+        let userInfo;
+        try {
+            userInfo = await resolveAccount(account, context);
+        } catch (error) {
+            await releaseAuthAttempt(context.env, limitCheck); // 基础设施错误不算一次猜测
+            throw error;
+        }
         const isReadOnly = userInfo.isReadOnly;
         const permissions = userInfo.exists ? userInfo.permissions : null;
 
         // 如果都不存在，记录失败并返回错误
         if(!permissions) {
-            await recordAuthFailure(context.env, username, clientIP);
-
-            // 重新检查限制状态
-            const updatedLimitCheck = await checkAuthLimit(context.env, username, clientIP);
+            // 失败保留名额；占到最后一个名额的这次失败写入封禁并返回锁定结果。
+            const failure = await recordAuthFailure(context.env, username, clientIP, limitCheck);
             // L3：失败消息不再透露剩余尝试次数（攻击者可用它判断账号是否存在 /
             // 探测限流状态）；只在已触发锁定时告知锁定。
             let message = "用户名或密码错误";
-            if (!updatedLimitCheck.allowed && updatedLimitCheck.banned) {
-                message = updatedLimitCheck.message;
+            if (failure.banned) {
+                message = failure.message;
             }
 
             return new Response(JSON.stringify({
                 success: false,
                 message: message,
-                banned: !updatedLimitCheck.allowed && updatedLimitCheck.banned
+                banned: !!failure.banned
             }), {
-                status: updatedLimitCheck.allowed ? 401 : 429,
+                status: failure.banned ? 429 : 401,
                 headers: { "Content-Type": "application/json" }
             });
         }
